@@ -58,7 +58,9 @@ internal static class ProbeSelfTests
         {
             string path = LoginStartup.CurrentExecutablePath();
             if (!File.Exists(path) || !Path.IsPathFullyQualified(path)
-                || Path.GetFileName(path) != "PixelLyrics.Probe.exe") throw new Exception();
+                || (string.Equals(Path.GetFileNameWithoutExtension(Environment.ProcessPath), "dotnet", StringComparison.OrdinalIgnoreCase)
+                    ? Path.GetFileName(path) != "PixelLyrics.Probe.exe"
+                    : !string.Equals(path, Environment.ProcessPath, StringComparison.OrdinalIgnoreCase))) throw new Exception();
         });
         Check("旧自启项可以明确保存修复", () =>
         {

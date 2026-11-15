@@ -40,8 +40,8 @@ internal sealed class LoginStartup(ILoginStartupStore store, Func<string> execut
     {
         string expected = Path.ChangeExtension(typeof(LoginStartup).Assembly.Location, ".exe");
         string? process = Environment.ProcessPath;
-        string path = process is not null && string.Equals(Path.GetFileNameWithoutExtension(process),
-            typeof(LoginStartup).Assembly.GetName().Name, StringComparison.OrdinalIgnoreCase) ? process : expected;
+        string path = process is not null && !string.Equals(Path.GetFileNameWithoutExtension(process),
+            "dotnet", StringComparison.OrdinalIgnoreCase) ? process : expected;
         if (!File.Exists(path)) throw new FileNotFoundException("未找到应用 exe，不能设置登录自启。");
         return path;
     }

@@ -3,6 +3,7 @@
 .tools/
 .workbuddy/
 .vs/
+release/
 **/artifacts/
 *.user
 *.suo
