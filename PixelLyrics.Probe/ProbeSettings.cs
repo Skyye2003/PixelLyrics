@@ -9,6 +9,8 @@ internal sealed record ProbeSongBinding(string Mid, string? ArtistAlias = null);
 internal sealed class ProbeSettings
 {
     internal const int MaxFileBytes = 1024 * 1024;
+    public MusicPlayer Player { get; set; }
+    public Dictionary<string, string> NetEaseBindings { get; } = new(StringComparer.Ordinal);
 
     public int OffsetMs { get; set; }
     public int DisplayWidthUnits { get; set; } = 32;
@@ -50,6 +52,13 @@ internal sealed class ProbeSettings
                 if (!fields.Add(property.Name)) throw new InvalidDataException("配置字段重复。");
                 switch (property.Name)
                 {
+                    case nameof(Player):
+                        settings.Player = property.Value.GetString() switch { "QQMusic" => MusicPlayer.QQMusic, "NetEaseMusic" => MusicPlayer.NetEaseMusic, _ => throw new InvalidDataException("播放器配置无效。") };
+                        break;
+                    case nameof(NetEaseBindings):
+                        foreach (var entry in property.Value.EnumerateObject())
+                            if (!settings.NetEaseBindings.TryAdd(entry.Name, entry.Value.GetString()!)) throw new InvalidDataException("网易云绑定重复。");
+                        break;
                     case nameof(OffsetMs): settings.OffsetMs = property.Value.GetInt32(); break;
                     case nameof(DisplayWidthUnits): settings.DisplayWidthUnits = property.Value.GetInt32(); break;
                     case nameof(PageHoldMs): settings.PageHoldMs = property.Value.GetInt32(); break;
@@ -99,6 +108,7 @@ internal sealed class ProbeSettings
         if (options.SaveSettings && options.SettingsPath is null)
             throw new ArgumentException("保存配置必须指定路径。", nameof(options));
         ProbeSettings settings = options.SettingsPath is null ? new() : Load(options.SettingsPath);
+        if (options.HasPlayer) settings.Player = options.Player;
         if (options.HasOffset)
         {
             settings.OffsetMs = options.OffsetMs;
@@ -122,7 +132,7 @@ internal sealed class ProbeSettings
         string fullPath = LocalPath(path);
         string directory = Path.GetDirectoryName(fullPath)!;
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException("配置父目录必须已存在。");
-        byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { OffsetMs, DisplayWidthUnits, PageHoldMs, ClockStyle, IdleClockEnabled, IdleClockDelayMs, TrackIntroEnabled, TrackIntroHoldMs, NoLyricsTitleHoldMs, PollIntervalMs, TrackSettleMs, RequestTimeoutMs, Bindings }, new JsonSerializerOptions { WriteIndented = true });
+        byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { Player = Player.ToString(), NetEaseBindings, OffsetMs, DisplayWidthUnits, PageHoldMs, ClockStyle, IdleClockEnabled, IdleClockDelayMs, TrackIntroEnabled, TrackIntroHoldMs, NoLyricsTitleHoldMs, PollIntervalMs, TrackSettleMs, RequestTimeoutMs, Bindings }, new JsonSerializerOptions { WriteIndented = true });
         if (json.Length > MaxFileBytes) throw new InvalidDataException("配置超过 1MiB 上限。");
         string temporary = Path.Combine(directory, ".probe-settings-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
@@ -144,6 +154,7 @@ internal sealed class ProbeSettings
     internal void ApplyRuntimeOverrides(ProbeSettings overrides)
     {
         overrides.Validate();
+        Player = overrides.Player;
         TrackIntroEnabled = overrides.TrackIntroEnabled;
         TrackIntroHoldMs = overrides.TrackIntroHoldMs;
         ClockStyle = overrides.ClockStyle;
@@ -157,6 +168,12 @@ internal sealed class ProbeSettings
 
     private void Validate()
     {
+        if (!Enum.IsDefined(Player)) throw new InvalidDataException("播放器配置无效。");
+        foreach (var binding in NetEaseBindings)
+        {
+            if (binding.Value is null || !MusicPlayers.ValidNetEaseId(binding.Value)) throw new InvalidDataException("网易云绑定 ID 无效。");
+            ValidateBinding(binding.Key, new(binding.Value));
+        }
         if (OffsetMs is < -5000 or > 5000) throw new InvalidDataException("偏移必须在 -5000..5000 毫秒范围内。");
         if (DisplayWidthUnits is < 8 or > 64) throw new InvalidDataException("显示宽度必须在 8..64 单位范围内。");
         if (PageHoldMs is < 500 or > 10000) throw new InvalidDataException("分页停留必须在 500..10000 毫秒范围内。");

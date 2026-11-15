@@ -1,6 +1,6 @@
 # PixelLyrics
 
-Windows WPF 歌词屏应用：读取当前媒体曲目，在用户授权后获取 QQ 音乐歌词，并通过 PixelBar SDK 输出到 USB 歌词屏。
+Windows WPF 歌词屏应用：读取当前媒体曲目，在用户授权后获取歌词，并通过 PixelBar SDK 输出到 USB 歌词屏。已发布版本支持 QQ 音乐；当前开发代码增加网易云音乐接入，尚未完成发布验收。
 
 界面包含运行、显示和高级设置，支持浅深主题与自适应分栏。联网与输出需要用户明确授权，启动应用不会自动开始歌词同步。
 
@@ -33,6 +33,36 @@ dotnet publish PixelLyrics.Probe/PixelLyrics.Probe.csproj -p:PublishProfile=Wind
 dotnet run --project PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release -- --self-test
 dotnet run --project PixelLyrics.Tests/PixelLyrics.Tests.csproj -c Release
 ```
+
+## 网易云音乐（开发验证中）
+
+运行页可选择播放器，开始后固定跟随，停止后才能切换；切换会清除本次联网和输出授权。QQ 与网易云绑定分别保存，不跨平台回退。网易云接口客户端内置于程序，无需 Node.js、代理服务、Cookie 或登录凭证。
+
+实测组合为网易云 **3.1.41.205564 x64 + BetterNCM 1.3.4 x64 + InfLink-rs 3.4.0**。进度桥接已通过连续播放、暂停恢复、双向拖动、切歌及双播放器检查，详见 [组件实测](docs/netease-plugin-test.md)。匿名接口详情、搜索核验和取词已验证；已按官方网页播放器行为兼容行首 `[00:00.00-1]` 为零秒，其他未经核实的异常标签仍显示错误并锁止本次后续联网。详见 [接入验证](docs/netease-api-integration.md)。
+
+仅验证跟随与取词、不写 USB 的命令：
+
+```powershell
+dotnet run --project PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release -- --online --follow --player netease --duration 30
+```
+
+网易云所需组件最终将随安装 EXE 交付；安装包、完整对应源码材料、干净环境安装/卸载以及真实 USB 同步验收尚未完成，当前不发布 v0.2.0，也不宣称免插件原生支持。
+
+### 原生兼容性诊断
+
+本机无插件网易云 3.1.33.205244 连续播放实测未提供有效进度和总时长，未通过原生同步门槛。之后经用户授权转向上述组件方案。详见 [兼容性实测](docs/netease-native-compatibility.md)。原生诊断结论仅适用于记录中的版本与环境。
+
+在 Windows 交互桌面打开网易云并播放歌曲，然后运行：
+
+```powershell
+dotnet run --project PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release -- --diagnose-netease
+```
+
+每轮约 65 秒，仅通过 Windows 媒体会话读取客户端版本、会话标识、歌名、歌手、专辑及时间线，向标准输出写入 JSONL。不会联网取词、访问 USB、保存配置或修改播放器。日志包含曲目信息，分享前请检查。Ctrl+C 可取消。
+
+先连续播放至少 60 秒，再分轮记录暂停与恢复、向前与向后拖动、切歌，以及 QQ 音乐同时打开的场景，并记下操作时间及播放器实际显示的进度。诊断不能判断客户端是否安装插件，验证时需使用无插件客户端。
+
+退出码 0 仅表示采到可用时间线，不代表通过全部兼容性验收；2 表示无可用样本或采样未完成；3 表示会话访问失败，需在交互桌面重试，不能据此认定客户端不兼容。缺少会话也应先确认播放器确实正在播放。安装组件后的结果不能视为免插件原生兼容性通过。
 
 ## 目录
 

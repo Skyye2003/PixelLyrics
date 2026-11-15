@@ -6,7 +6,7 @@ namespace PixelLyrics.Probe;
 
 internal sealed record MediaSnapshot(SongIdentity Song, TimeSpan Position, TimeSpan Start,
     TimeSpan End, DateTimeOffset Updated, GlobalSystemMediaTransportControlsSessionPlaybackStatus Status,
-    double Rate, long Revision, bool Stable, TimeSpan TimelineAgeAtSample, long SampleTimestamp)
+    double Rate, long Revision, bool Stable, TimeSpan TimelineAgeAtSample, long SampleTimestamp, string? SourceSongId = null)
 {
     public TimeSpan TimelineAge => TimelineAgeAtSample + Stopwatch.GetElapsedTime(SampleTimestamp);
     public bool IsStale => TimelineAge > TimeSpan.FromSeconds(5);
@@ -27,31 +27,39 @@ internal sealed class MediaProbe : IDisposable
     private readonly GlobalSystemMediaTransportControlsSessionManager manager;
     private readonly GlobalSystemMediaTransportControlsSession? selected;
     private long revision;
+    private readonly MusicPlayer player;
+    internal string UnavailableReason
+    {
+        get
+        {
+            int count = manager.GetSessions().Count(s => player.Matches(s.SourceAppUserModelId));
+            return count != 1 ? $"{player.DisplayName()}会话匹配数为 {count}；请保留一个播放会话后停止并重新开始"
+                : $"{player.DisplayName()}会话或进度不可用；请确认进度组件兼容并停止后重新开始";
+        }
+    }
 
-    public MediaProbe(GlobalSystemMediaTransportControlsSessionManager manager)
+    public MediaProbe(GlobalSystemMediaTransportControlsSessionManager manager, MusicPlayer player = MusicPlayer.QQMusic)
     {
         this.manager = manager;
+        this.player = player;
         var sessions = manager.GetSessions();
         Console.WriteLine($"媒体会话：{sessions.Count}");
         foreach (var session in sessions) Console.WriteLine($"  AppId={session.SourceAppUserModelId}");
-        var matches = sessions.Where(IsQqMusic).ToArray();
+        var matches = sessions.Where(s => player.Matches(s.SourceAppUserModelId)).ToArray();
         if (matches.Length == 1)
         {
             selected = matches[0];
             selected.MediaPropertiesChanged += OnMediaChanged;
         }
-        else Console.WriteLine($"QQMusic 匹配数为 {matches.Length}，不自动选择或绑定歌词。");
+        else Console.WriteLine($"{player.DisplayName()}匹配数为 {matches.Length}，不自动选择或绑定歌词。");
     }
-
-    private static bool IsQqMusic(GlobalSystemMediaTransportControlsSession session) =>
-        session.SourceAppUserModelId.Contains("qqmusic", StringComparison.OrdinalIgnoreCase);
 
     private void OnMediaChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs args) =>
         Interlocked.Increment(ref revision);
 
     public async Task<MediaSnapshot?> ReadAsync(CancellationToken cancellationToken)
     {
-        var matches = manager.GetSessions().Where(IsQqMusic).ToArray();
+        var matches = manager.GetSessions().Where(s => player.Matches(s.SourceAppUserModelId)).ToArray();
         if (selected is null || matches.Length != 1 || !selected.Equals(matches[0])) return null;
         long before = Interlocked.Read(ref revision);
         var first = await selected.TryGetMediaPropertiesAsync().AsTask(cancellationToken);
@@ -61,6 +69,7 @@ internal sealed class MediaProbe : IDisposable
         var playback = selected.GetPlaybackInfo();
         var second = await selected.TryGetMediaPropertiesAsync().AsTask(cancellationToken);
         bool stable = before == Interlocked.Read(ref revision)
+            && (player != MusicPlayer.NetEaseMusic || MusicPlayers.NetEaseId(first.Genres) == MusicPlayers.NetEaseId(second.Genres))
             && first.Title == second.Title && first.Artist == second.Artist && first.AlbumTitle == second.AlbumTitle
             && !string.IsNullOrWhiteSpace(second.Title)
             && timeline.StartTime >= TimeSpan.Zero && timeline.EndTime > timeline.StartTime
@@ -68,11 +77,12 @@ internal sealed class MediaProbe : IDisposable
         var duration = timeline.EndTime >= timeline.StartTime ? timeline.EndTime - timeline.StartTime : TimeSpan.Zero;
         return new(new SongIdentity(second.Title, second.Artist, second.AlbumTitle, duration),
             timeline.Position, timeline.StartTime, timeline.EndTime, timeline.LastUpdatedTime,
-            playback.PlaybackStatus, playback.PlaybackRate ?? 1d, before, stable, timelineAge, sampleTimestamp);
+            playback.PlaybackStatus, playback.PlaybackRate ?? 1d, before, stable, timelineAge, sampleTimestamp,
+            player == MusicPlayer.NetEaseMusic ? MusicPlayers.NetEaseId(second.Genres) : null);
     }
 
     public bool IsCurrent(MediaSnapshot snapshot) => snapshot.Revision == Interlocked.Read(ref revision)
-        && selected is not null && manager.GetSessions().Where(IsQqMusic).ToArray() is var matches
+        && selected is not null && manager.GetSessions().Where(s => player.Matches(s.SourceAppUserModelId)).ToArray() is var matches
         && matches.Length == 1 && selected.Equals(matches[0]);
 
     public void Dispose()

@@ -5,7 +5,8 @@ namespace PixelLyrics.Probe;
 internal sealed record ProbeOptions(bool Watch, string? LrcPath, bool TestScreen, bool Send, bool Help,
     int? DurationSeconds, int OffsetMs, bool DesktopLyrics, bool ScreenSequence, bool Accessibility,
     bool Online, string? SongMid, string? ArtistAlias,
-    bool Follow = false, string? SettingsPath = null, bool SaveSettings = false, bool HasOffset = false)
+    bool Follow = false, string? SettingsPath = null, bool SaveSettings = false, bool HasOffset = false,
+    MusicPlayer Player = MusicPlayer.QQMusic, bool HasPlayer = false)
 {
     public static ProbeOptions Parse(string[] args)
     {
@@ -17,11 +18,18 @@ internal sealed record ProbeOptions(bool Watch, string? LrcPath, bool TestScreen
         int? duration = null;
         int offset = 0;
         bool hasOffset = false;
+        bool hasPlayer = false;
+        MusicPlayer player = MusicPlayer.QQMusic;
         for (int i = 0; i < args.Length; i++)
         {
             switch (args[i])
             {
                 case "--help": case "-h": help = true; break;
+                case "--player":
+                    if (hasPlayer || ++i >= args.Length) throw new ArgumentException("--player 必须指定一次 qqmusic 或 netease。");
+                    player = args[i] switch { "qqmusic" => MusicPlayer.QQMusic, "netease" => MusicPlayer.NetEaseMusic, _ => throw new ArgumentException("播放器无效。") };
+                    hasPlayer = true;
+                    break;
                 case "--watch": watch = true; break;
                 case "--online":
                     if (online) throw new ArgumentException("--online 不可重复。");
@@ -76,6 +84,8 @@ internal sealed record ProbeOptions(bool Watch, string? LrcPath, bool TestScreen
                 default: throw new ArgumentException($"未知参数：{args[i]}；使用 --help 查看说明。");
             }
         }
+        if (!help && player == MusicPlayer.NetEaseMusic && (songMid is not null || artistAlias is not null || accessibility || desktopLyrics))
+            throw new ArgumentException("网易云不支持 QQ MID、别名或 QQ 窗口诊断参数。");
         if (!help && follow && (!online || songMid is not null || artistAlias is not null))
             throw new ArgumentException("--follow 必须与 --online 组合，且不可使用 --songmid 或 --artist-alias 启动别名。");
         if (!help && saveSettings && settingsPath is null)
@@ -93,7 +103,7 @@ internal sealed record ProbeOptions(bool Watch, string? LrcPath, bool TestScreen
         if (!help && send && path is null && !online) throw new ArgumentException("--send 必须与 --lrc 或 --online 组合使用。");
         if (!help && test && send) throw new ArgumentException("--test-screen 与 --send 请分开运行。");
         return new(watch, path, test, send, help, duration, offset, desktopLyrics, screenSequence, accessibility,
-            online, songMid, artistAlias, follow, settingsPath, saveSettings, hasOffset);
+            online, songMid, artistAlias, follow, settingsPath, saveSettings, hasOffset, player, hasPlayer);
     }
 
     public const string HelpText = """
@@ -101,12 +111,14 @@ internal sealed record ProbeOptions(bool Watch, string? LrcPath, bool TestScreen
         无参数 / --gui：打开设置界面；--tray：独立参数，仅启动至托盘，不联网、不写屏、不开始歌词。
         界面登录自启默认关闭，保存全部设置时应用；开关只存于当前用户 Run 的 PixelLyrics 项，不存 JSON。
         自启仅在当前用户登录时启动托盘，无需管理员权限，不代表联网或同步授权。
-        其他探测参数：枚举 SDK 屏幕端点、GSMTC 媒体会话，读取唯一 QQMusic 会话的曲目与时间线。
+        其他探测参数：枚举 SDK 屏幕端点、GSMTC 媒体会话，读取所选播放器唯一会话的曲目与时间线。
+        --player <值>       qqmusic 或 netease；未指定时读取配置，旧配置默认 QQ 音乐。运行内固定播放器。
         --watch             每 250ms 输出位置与状态；单独使用不向 USB 写屏。
-        --lrc <本地路径>    导入 LRC，只在内存绑定启动时唯一 QQMusic 会话的当前曲目，持续预览。
+        --lrc <本地路径>    导入 LRC，只在内存绑定启动时所选播放器唯一会话的当前曲目，持续预览。
         --duration <N>     正整数秒数，自动启用 watch，到时退出，无需 Ctrl+C。
         --offset-ms <毫秒>  -5000..5000，默认 0；正值延后歌词（查询位置减去偏移）。
-        --online            明确授权向 QQ音乐 c.y.qq.com 发送启动曲目歌名、向 u.y.qq.com 发送 MID 查询详情和普通LRC。
+        --online            授权所选来源：QQ 使用 c.y.qq.com / u.y.qq.com；网易云使用 music.163.com 查询详情和普通 LRC。
+                            网易云可使用进度组件提供的 NCM 歌曲 ID；缺失时搜索并核验，不回退到 QQ。
                             无 Cookie/凭据/代理/重定向，10秒期限、不重试；HTTP/业务码异常立即停止。
                             唯一 GSMTC 会话，歌名/歌手/专辑 NFKC 精确核对、时长容差2秒；多个匹配拒绝。
                             默认仅终端预览，不保存歌词文件；与 lrc/诊断/屏幕测试互斥。
@@ -128,7 +140,7 @@ internal sealed record ProbeOptions(bool Watch, string? LrcPath, bool TestScreen
         --screen-sequence   与 test/send 互斥，唯一严格设备依次显示“第一行 测试”3秒、
                             “第二行 测试”3秒并清除；报告调用结果，需用户肉眼确认，不改灯光音量。
         --help / -h         显示本说明。
-        只接受 AppId 包含 qqmusic（忽略大小写）的会话；多个匹配时拒绝自动选择。
+        仅匹配所选播放器的会话；多个匹配时拒绝自动选择，不跨播放器跟随。
         只允许唯一 VID=2D99/PID=A106/col02 且 MI_04、UsagePage=FF24/FF14、Usage=1、64 字节报告端点写入。
         按完整 SongIdentity.Id 绑定；默认切歌或会话变化后失效，--follow 才重新验证后续歌曲。
         属性 revision 仅检查快照一致性；不稳定时暂停显示，同曲目恢复稳定后可继续。

@@ -16,6 +16,8 @@ namespace PixelLyrics.Probe;
 internal sealed class DesktopWindow : Window, IDisposable
 {
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "desktop-settings.json");
+    private readonly ComboBox _player = new() { Width = 180, DisplayMemberPath = "Value", SelectedValuePath = "Key" };
+    private MusicPlayer SelectedPlayer => _player.SelectedValue is MusicPlayer player ? player : MusicPlayer.QQMusic;
     private readonly CheckBox _authorization = new() { Content = "允许本次联网获取 QQ 音乐歌词并输出到 USB 歌词屏", IsChecked = false };
     private readonly Button _start = MakeButton("开始运行");
     private readonly Button _stop = MakeButton("停止并清屏");
@@ -153,6 +155,14 @@ internal sealed class DesktopWindow : Window, IDisposable
         current.Children.Add(InlineActions(_check, _recheck, 440));
         current.Children.Add(_output);
         var controls = new StackPanel();
+        _player.ItemsSource = Enum.GetValues<MusicPlayer>().Select(p => new KeyValuePair<MusicPlayer, string>(p, p.DisplayName()));
+        _player.SelectedValue = MusicPlayer.QQMusic;
+        var playerLabel = new Label { Content = "播放器", Target = _player, Padding = new Thickness(0, 0, 0, 6) };
+        AutomationProperties.SetName(_player, "播放器");
+        _player.HorizontalAlignment = HorizontalAlignment.Left;
+        _player.Margin = new Thickness(0, 0, 0, 12);
+        controls.Children.Add(playerLabel);
+        controls.Children.Add(_player);
         string authorization = "允许本次联网获取 QQ 音乐歌词并输出到 USB 歌词屏";
         _authorization.Content = new TextBlock { Text = authorization, TextWrapping = TextWrapping.Wrap };
         AutomationProperties.SetName(_authorization, authorization);
@@ -267,6 +277,14 @@ internal sealed class DesktopWindow : Window, IDisposable
         _logTimer.Start();
         Program.DesktopLog += ReceiveLog;
 
+        _player.SelectionChanged += (_, _) =>
+        {
+            _authorization.IsChecked = false;
+            string text = $"允许本次联网获取 {SelectedPlayer.DisplayName()}歌词并输出到 USB 歌词屏";
+            _authorization.Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
+            AutomationProperties.SetName(_authorization, text);
+            UpdateControls();
+        };
         _authorization.Checked += (_, _) => UpdateControls();
         _authorization.Unchecked += (_, _) => UpdateControls();
         _offset.ValueChanged += (_, _) => UpdateOffsetText();
@@ -457,7 +475,7 @@ internal sealed class DesktopWindow : Window, IDisposable
         _displayedTrack = s?.Track;
         _recheck.IsEnabled = !_exiting && !_stopping && !_clockBusy && _running
             && _session?.CanRecheck(_session.Clock.Elapsed) == true;
-        _title.Text = s?.Title ?? (s?.Running == true ? "等待 QQ 音乐播放" : "尚未开始");
+        _title.Text = s?.Title ?? (s?.Running == true ? $"等待 {SelectedPlayer.DisplayName()}播放" : "尚未开始");
         _artist.Text = s?.Artist ?? "";
         _artist.ToolTip = _artist.Text;
         string playback = s?.Playback switch { "Playing" => "播放中", "Paused" => "已暂停", "Stopped" => "已停止", "Closed" => "播放器已关闭", "Opened" => "等待播放", _ => s?.Playback ?? "" };
@@ -469,7 +487,7 @@ internal sealed class DesktopWindow : Window, IDisposable
         _recheck.Visibility = s is null ? Visibility.Collapsed : Visibility.Visible;
         RefreshSettingsFeedback();
         if (s is not null)
-            _sessionPanel.Text = $"会话 {s.RunId.ToString()[..8]} · {(s.Running ? s.Stopping ? "停止中" : "运行中" : "已结束")}\n"
+            _sessionPanel.Text = $"播放器及歌词来源：{(s.Active?.Player ?? SelectedPlayer).DisplayName()}\n会话 {s.RunId.ToString()[..8]} · {(s.Running ? s.Stopping ? "停止中" : "运行中" : "已结束")}\n"
                 + $"曲目：{s.Title ?? "不可用"} / {s.Artist ?? "未知"} · {s.Playback}\n"
                 + $"核对：{s.Check} · attempt {s.AttemptId} · {(s.Busy ? "忙碌" : _session!.Clock.Elapsed < s.CooldownUntil ? "冷却中" : "空闲")}\n"
                 + $"输出：{s.Display}";
@@ -488,6 +506,7 @@ internal sealed class DesktopWindow : Window, IDisposable
         _save.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy && _settingsValid;
         _reload.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy;
         _authorization.IsEnabled = !_exiting && !_running;
+        _player.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy;
         _loginStartup.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy;
         _offset.IsEnabled = !_exiting;
         _clock.IsEnabled = !_exiting && !_clockBusy && !_stopping && !_configurationBusy && _settingsValid;
@@ -520,6 +539,7 @@ internal sealed class DesktopWindow : Window, IDisposable
 
     private ProbeSettings CaptureRuntimeSettings() => new()
     {
+        Player = SelectedPlayer,
         IdleClockEnabled = _idleClock.IsChecked == true,
         IdleClockDelayMs = (int)_idleClockDelay.SelectedItem,
         TrackIntroEnabled = _trackIntro.IsChecked == true,
@@ -562,6 +582,7 @@ internal sealed class DesktopWindow : Window, IDisposable
             _savedParameters = DesktopParameters.From(settings);
             if (!save)
             {
+                _player.SelectedValue = settings.Player;
                 _offset.Value = settings.OffsetMs;
                 _width.SelectedItem = settings.DisplayWidthUnits;
                 if (!_hold.Items.Contains(settings.PageHoldMs)) _hold.Items.Add(settings.PageHoldMs);

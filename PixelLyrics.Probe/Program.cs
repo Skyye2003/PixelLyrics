@@ -28,7 +28,7 @@ internal static class Program
         if (save) arguments.Add("--save-settings");
         try
         {
-            ReportDesktopLog("开始初始化设备和QQ音乐媒体会话。");
+            ReportDesktopLog($"开始初始化设备和{(runtimeSettings?.Player ?? MusicPlayer.QQMusic).DisplayName()}媒体会话。");
             return await RunAsync(ProbeOptions.Parse(arguments.ToArray()), token, widthUnits, pageHoldMs, runtimeSettings, session).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -47,7 +47,28 @@ internal static class Program
     {
         if (DesktopLaunch.Parse(args) is bool startInTray) return DesktopHost.Run(startInTray);
         Console.OutputEncoding = Encoding.UTF8;
+        if (args.Length == 1 && args[0] == "--diagnose-netease") return await NativeMediaDiagnostic.RunAsync();
         if (args.Length == 1 && args[0] == "--self-test") return ProbeSelfTests.Run();
+        if (args.Length == 1 && args[0] == "--test-netease-api")
+        {
+            try
+            {
+                using var client = new NetEaseLyricsClient();
+                using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+                var details = await client.GetDetailsAsync("454549729", deadline.Token);
+                var selection = await client.RecallAsync(details.Title, string.Join(" / ", details.Singers), details.Album,
+                    details.Interval, deadline.Token, requiredMid: details.Mid);
+                if (selection.Winner is null) throw new FollowRunner.MatchUnavailableException(selection.Category);
+                var lyrics = await client.FetchAsync(details.Mid, deadline.Token);
+                Console.WriteLine(JsonSerializer.Serialize(new { Source = "NetEaseMusic", Id = details.Mid, SearchVerified = true, DurationSeconds = details.Interval, ArtistCount = details.Singers.Count, AlbumPresent = !string.IsNullOrWhiteSpace(details.Album), LrcLines = lyrics.Document.Lines.Count }));
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.WriteLine($"网易云接口验证失败：{error.GetType().Name}；没有写屏或保存歌词。");
+                return 1;
+            }
+        }
         if (args.Length == 1 && args[0] == "--inspect-metadata") return await InspectMetadataAsync();
         if (args.Length == 1 && args[0] == "--clear-screen")
         {
@@ -156,7 +177,9 @@ internal static class Program
     {
         var settings = ProbeSettings.LoadForRun(options);
         if (runtimeSettings is not null) settings.ApplyRuntimeOverrides(runtimeSettings);
-        options = options with { OffsetMs = options.HasOffset ? options.OffsetMs : settings.OffsetMs };
+        options = options with { Player = settings.Player, OffsetMs = options.HasOffset ? options.OffsetMs : settings.OffsetMs };
+        if (settings.Player == MusicPlayer.NetEaseMusic && (options.SongMid is not null || options.ArtistAlias is not null || options.Accessibility || options.DesktopLyrics))
+            throw new ArgumentException("网易云不可使用 QQ 专用参数。");
         settings.DisplayWidthUnits = widthUnits ?? settings.DisplayWidthUnits;
         settings.PageHoldMs = pageHoldMs ?? settings.PageHoldMs;
         session?.Update(s => s with { Active = DesktopParameters.From(settings) });
@@ -174,11 +197,11 @@ internal static class Program
         if (options.TestScreen && !screen!.Test()) return 5;
 
         var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask(cancellationToken);
-        using var media = new MediaProbe(manager);
+        using var media = new MediaProbe(manager, settings.Player);
         if (options.Follow) return await FollowRunner.RunAsync(options, media, screen, settings, cancellationToken, session);
         var initial = await media.ReadAsync(cancellationToken);
         if (initial is not null) PrintTrack(initial);
-        else Console.WriteLine("没有可安全读取的唯一 QQMusic 会话。");
+        else Console.WriteLine(media.UnavailableReason);
 
         LyricsDocument? lyrics = null;
         SongIdentity? boundSong = null;
@@ -203,7 +226,29 @@ internal static class Program
             Console.WriteLine($"已在内存绑定 {lyrics.Lines.Count} 行歌词至启动时曲目；不会自动绑定后续曲目。");
         }
 
-        if (options.Online)
+        if (options.Online && settings.Player == MusicPlayer.NetEaseMusic)
+        {
+            if (initial is null || !initial.Stable || initial.GetPosition() is null || !media.IsCurrent(initial)) return 4;
+            async Task EnsureNetEaseUnchanged()
+            {
+                var current = await media.ReadAsync(cancellationToken);
+                if (current is null || !current.Stable || current.GetPosition() is null || current.Song != initial.Song
+                    || current.SourceSongId != initial.SourceSongId || !media.IsCurrent(initial) || !media.IsCurrent(current))
+                    throw new OperationCanceledException("网易云曲目或会话变化，取消后续请求。");
+            }
+            var loaded = await FollowRunner.LoadAsync(initial.Song,
+                settings.NetEaseBindings.TryGetValue(initial.Song.Id, out var id) ? new(id) : null,
+                cancellationToken, requestTimeoutMs: settings.RequestTimeoutMs, player: settings.Player, sourceSongId: initial.SourceSongId,
+                beforeRequest: EnsureNetEaseUnchanged);
+            var check = await media.ReadAsync(cancellationToken);
+            if (check is null || !check.Stable || check.Song != initial.Song || check.SourceSongId != initial.SourceSongId
+                || !media.IsCurrent(initial) || !media.IsCurrent(check)) return 4;
+            lyrics = loaded.Document;
+            boundSong = initial.Song;
+            settings.NetEaseBindings[initial.Song.Id] = loaded.Mid;
+            if (options.SaveSettings) settings.Save(options.SettingsPath!);
+        }
+        else if (options.Online)
         {
             Console.WriteLine("--online 授权：向 QQ音乐发送启动歌名、歌手和 MID 以搜索、核对详情及取普通 LRC；不发送 Cookie/凭据/播放进度，不代理、不重定向、不重试。默认仅预览，只有 --send 才写屏。");
             if (initial is null || !initial.Stable || !media.IsCurrent(initial)

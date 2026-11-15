@@ -13,7 +13,7 @@ public sealed record SongDetails(string Mid, string Title, IReadOnlyList<string>
     }
 }
 
-public sealed class OnlineLyricsClient : IDisposable
+public sealed class OnlineLyricsClient : ILyricsSource
 {
     private readonly HttpClient client;
     private bool stopped;

@@ -16,8 +16,9 @@ internal static class FollowRunner
     }
 
     internal static async Task<LoadedLyrics> LoadAsync(SongIdentity song, ProbeSongBinding? binding,
-        CancellationToken token, Action? ensureNetworkAllowed = null, OnlineLyricsClient? testClient = null,
-        int requestTimeoutMs = 10000)
+        CancellationToken token, Action? ensureNetworkAllowed = null, ILyricsSource? testClient = null,
+        int requestTimeoutMs = 10000, MusicPlayer player = MusicPlayer.QQMusic, string? sourceSongId = null,
+        Func<Task>? beforeRequest = null)
     {
         ensureNetworkAllowed?.Invoke();
         if (string.IsNullOrWhiteSpace(song.Artist) || string.IsNullOrWhiteSpace(song.Album))
@@ -25,15 +26,18 @@ internal static class FollowRunner
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         if (requestTimeoutMs is < 2000 or > 30000) throw new ArgumentOutOfRangeException(nameof(requestTimeoutMs));
         deadline.CancelAfter(TimeSpan.FromMilliseconds(requestTimeoutMs));
-        using var ownedClient = testClient is null ? new OnlineLyricsClient(requestTimeoutMs) : null;
-        var client = testClient ?? ownedClient!;
+        using ILyricsSource? ownedClient = testClient is not null ? null : player == MusicPlayer.NetEaseMusic
+            ? new NetEaseLyricsClient(requestTimeoutMs) : new OnlineLyricsClient(requestTimeoutMs);
+        ILyricsSource client = testClient ?? ownedClient!;
+        if (player == MusicPlayer.NetEaseMusic && sourceSongId is not null) binding = new(sourceSongId);
         SongSelection selection;
         if (binding is null)
             selection = await client.RecallAsync(song.Title, song.Artist, song.Album,
-                song.Duration.TotalSeconds, deadline.Token, ensureNetworkAllowed);
+                song.Duration.TotalSeconds, deadline.Token, ensureNetworkAllowed, beforeRequest: beforeRequest);
         else
         {
             deadline.Token.ThrowIfCancellationRequested();
+            if (beforeRequest is not null) await beforeRequest();
             ensureNetworkAllowed?.Invoke();
             try
             {
@@ -45,6 +49,7 @@ internal static class FollowRunner
         }
         if (selection.Winner is null) throw new MatchUnavailableException(selection.Category);
         deadline.Token.ThrowIfCancellationRequested();
+        if (beforeRequest is not null) await beforeRequest();
         ensureNetworkAllowed?.Invoke();
         var result = await client.FetchAsync(selection.Winner.Details.Mid, deadline.Token);
         token.ThrowIfCancellationRequested();
@@ -58,7 +63,7 @@ internal static class FollowRunner
         var runId = session.Latest.RunId;
         LyricAttempt? pendingAttempt = null;
         string checkState = "等待曲目稳定";
-        Program.ReportDesktopLog("自动跟随已启用：只向 QQ音乐查询当前曲目的普通 LRC；切歌取消旧请求。失败不自动重试；不输出歌名或歌词正文。配置不会保存联网授权。");
+        Program.ReportDesktopLog($"自动跟随已启用：播放器及歌词来源为{settings.Player.DisplayName()}；切歌取消旧请求。失败不自动重试；不输出歌词正文。配置不会保存联网授权。");
         var started = session.Clock;
         using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(settings.PollIntervalMs));
         var gate = new FollowGeneration(settings.TrackSettleMs);
@@ -68,13 +73,14 @@ internal static class FollowRunner
         CancellationTokenSource? requestCancellation = null;
         Task<LoadedLyrics>? pending = null;
         long pendingGeneration = -1;
+        string? pendingSourceId = null;
         LyricsDocument? lyrics = null;
         MediaSnapshot? previous = null;
         long lastAdvance = 0;
         int advanceCount = 0;
         bool attempted = false;
         int networkBlocked = 0;
-        async Task<LoadedLyrics> LoadGuarded(SongIdentity song, ProbeSongBinding? binding, CancellationToken requestToken)
+        async Task<LoadedLyrics> LoadGuarded(SongIdentity song, ProbeSongBinding? binding, CancellationToken requestToken, string? sourceSongId)
         {
             try
             {
@@ -82,7 +88,16 @@ internal static class FollowRunner
                 {
                     requestToken.ThrowIfCancellationRequested();
                     if (Volatile.Read(ref networkBlocked) != 0) throw new OperationCanceledException();
-                }, requestTimeoutMs: settings.RequestTimeoutMs);
+                }, requestTimeoutMs: settings.RequestTimeoutMs, player: settings.Player, sourceSongId: sourceSongId,
+                    beforeRequest: async () =>
+                    {
+                        var current = await media.ReadAsync(requestToken);
+                        if (current is not { Stable: true } || !media.IsCurrent(current)
+                            || current.Song.Id != song.Id || current.SourceSongId != sourceSongId
+                            || current.GetPosition() is null || !session.CanApply(pendingAttempt)
+                            || !gate.CanApply(pendingGeneration, current.Song.Id, current.Revision))
+                            throw new OperationCanceledException();
+                    });
             }
             catch (Exception ex) when (ex is ProbeException or HttpRequestException)
             {
@@ -121,7 +136,7 @@ internal static class FollowRunner
                     requestCancellation = null;
                     lyrics = null;
                     pendingAttempt = null;
-                    checkState = usable ? "等待曲目稳定" : "会话不可用；重新核对不能重选会话，请停止再开始";
+                    checkState = usable ? "等待曲目稳定" : media.UnavailableReason;
                     session.Update(s => s with { Track = usable ? new(runId, gate.Generation, snapshot!.Song.Id, snapshot.Revision) : null,
                         Title = usable ? snapshot!.Song.Title : null, Artist = usable ? snapshot!.Song.Artist : null,
                         Busy = false, Settled = false, Check = s.NetworkBlocked ? s.Check : checkState });
@@ -138,7 +153,9 @@ internal static class FollowRunner
                 if (screen?.HasFailed == true) break;
                 session.Update(s => s with { Settled = usable && gate.IsSettled(started.Elapsed),
                     Playback = usable ? snapshot!.Status.ToString() : "会话不可用",
-                    Check = !usable && !s.NetworkBlocked ? "会话不可用；重新核对不能重选会话，请停止再开始" : s.Check });
+                    Check = s.NetworkBlocked ? s.Check : !usable ? media.UnavailableReason
+                        : snapshot!.GetPosition() is null ? "播放进度不可用或已过期；请恢复播放并确认进度组件正常"
+                        : s.Check == "播放进度不可用或已过期；请恢复播放并确认进度组件正常" ? checkState : s.Check });
                 if (session.TakeRecheck(session.Latest.Track, started.Elapsed))
                 {
                     attempted = false;
@@ -148,15 +165,19 @@ internal static class FollowRunner
                     // 保留 MID 绑定和原开场计时，不重播开场。
                 }
                 if (Volatile.Read(ref networkBlocked) != 0) lyrics = null;
-                if (usable && !attempted && Volatile.Read(ref networkBlocked) == 0 && gate.IsSettled(started.Elapsed))
+                if (usable && snapshot!.GetPosition() is not null && !attempted && Volatile.Read(ref networkBlocked) == 0 && gate.IsSettled(started.Elapsed))
                 {
                     pendingAttempt = session.BeginAttempt(new(runId, gate.Generation, snapshot!.Song.Id, snapshot.Revision));
                     if (pendingAttempt is null) continue;
                     attempted = true;
-                    settings.Bindings.TryGetValue(snapshot!.Song.Id, out var binding);
+                    ProbeSongBinding? binding;
+                    if (settings.Player == MusicPlayer.NetEaseMusic)
+                        binding = settings.NetEaseBindings.TryGetValue(snapshot!.Song.Id, out var id) ? new(id) : null;
+                    else settings.Bindings.TryGetValue(snapshot!.Song.Id, out binding);
                     requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
                     pendingGeneration = gate.Generation;
-                    pending = LoadGuarded(snapshot.Song, binding, requestCancellation.Token);
+                    pendingSourceId = snapshot.SourceSongId;
+                    pending = LoadGuarded(snapshot.Song, binding, requestCancellation.Token, snapshot.SourceSongId);
                     Program.ReportDesktopLog("开始核对当前曲目；取词与可选歌名与歌手开场独立进行。");
                 }
                 if (pending is { IsCompleted: true })
@@ -169,12 +190,13 @@ internal static class FollowRunner
                         // Re-read after completion to close the request/track-change race.
                         var check = await media.ReadAsync(token);
                         if (usable && session.CanApply(pendingAttempt) && gate.CanApply(pendingGeneration, check?.Song.Id, check?.Revision ?? -1)
-                            && check is { Stable: true } && media.IsCurrent(check))
+                            && check is { Stable: true } && check.SourceSongId == pendingSourceId && media.IsCurrent(check))
                         {
                             token.ThrowIfCancellationRequested();
                             checkState = "已核对并在内存绑定歌词";
                             lyrics = loaded.Document;
-                            settings.SetVerifiedBinding(check.Song, loaded.Mid, loaded.Alias);
+                            if (settings.Player == MusicPlayer.NetEaseMusic) settings.NetEaseBindings[check.Song.Id] = loaded.Mid;
+                            else settings.SetVerifiedBinding(check.Song, loaded.Mid, loaded.Alias);
                             if (options.SaveSettings) settings.Save(options.SettingsPath!);
                             snapshot = check;
                             Program.ReportDesktopLog($"当前曲目已绑定 {lyrics.Lines.Count} 行；歌词仅保存在内存。");
@@ -201,6 +223,7 @@ internal static class FollowRunner
                     {
                         // Only locally defined, allowlisted categories are logged; never raw response text.
                         Interlocked.Exchange(ref networkBlocked, 1);
+                        session.BlockNetwork(runId, SafeFailureReason(ex));
                         Program.ReportDesktopLog($"在线核对失败：{SafeFailureReason(ex)}；本次运行停止后续联网，不显示旧词。");
                     }
                     catch (HttpRequestException)
@@ -339,6 +362,11 @@ internal static class FollowRunner
         "响应带加密/QRC 数据或标志，拒绝处理。" => "响应不是已支持的普通LRC格式",
         "HTTP 401；不跟随重定向。" => "HTTP 401，访问未授权",
         "HTTP 403；不跟随重定向。" => "HTTP 403，访问被拒绝",
+        "网易云 LRC 无效。" => "网易云歌词时间标签或内容格式无效",
+        "网易云响应缺少 LRC。" => "网易云响应缺少普通 LRC",
+        "网易云接口业务码异常。" => "网易云接口业务码异常",
+        "网易云响应格式错误。" => "网易云响应格式错误",
+        "网易云详情 ID 不一致。" => "网易云歌曲详情 ID 不一致",
         _ => "接口响应未通过协议校验"
     };
 

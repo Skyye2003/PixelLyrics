@@ -33,6 +33,21 @@ internal static class ProbeSelfTests
                 throw new Exception();
             });
         SessionSelfTests.Register(Check);
+        NetEaseSelfTests.Register(Check);
+        Check("网易云诊断识别会话且不混入QQ", () =>
+        {
+            if (!NativeMediaDiagnostic.IsNetEase("CloudMusic.exe")
+                || !NativeMediaDiagnostic.IsNetEase("Orpheus")
+                || NativeMediaDiagnostic.IsNetEase("QQMusic.exe")) throw new Exception();
+        });
+        Check("网易云诊断拒绝过期进度和缺失专辑", () =>
+        {
+            bool Valid(string album, int age, int position = 10) => NativeMediaDiagnostic.HasUsableTimeline(
+                "song", "artist", album, TimeSpan.Zero, TimeSpan.FromSeconds(200),
+                TimeSpan.FromSeconds(position), TimeSpan.FromSeconds(age), 1);
+            if (!Valid("album", 1) || Valid("album", 6) || Valid("", 1)
+                || Valid("album", -1) || Valid("album", 1, 201)) throw new Exception();
+        });
         const string startupExe = @"C:\Program Files\歌词 屏\PixelLyrics.Probe.exe";
         Check("自启绝对路径带空格中文及命令引号", () =>
         {

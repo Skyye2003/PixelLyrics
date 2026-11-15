@@ -3,15 +3,16 @@ namespace PixelLyrics.Probe;
 // 参数按值比较；绑定、自启和授权不属于运行显示参数。
 internal sealed record DesktopParameters(int OffsetMs, int Width, int Hold, int ClockStyle,
     bool IdleClock, int IdleDelay, bool Intro, int IntroHold, int NoLyricsHold,
-    int Poll, int Settle, int Timeout)
+    int Poll, int Settle, int Timeout, MusicPlayer Player = MusicPlayer.QQMusic)
 {
     internal static DesktopParameters From(ProbeSettings s) => new(s.OffsetMs, s.DisplayWidthUnits,
         s.PageHoldMs, s.ClockStyle, s.IdleClockEnabled, s.IdleClockDelayMs, s.TrackIntroEnabled,
-        s.TrackIntroHoldMs, s.NoLyricsTitleHoldMs, s.PollIntervalMs, s.TrackSettleMs, s.RequestTimeoutMs);
+        s.TrackIntroHoldMs, s.NoLyricsTitleHoldMs, s.PollIntervalMs, s.TrackSettleMs, s.RequestTimeoutMs, s.Player);
     internal string Differences(DesktopParameters? other)
     {
         if (other is null) return "无快照";
         var names = new List<string>();
+        if (Player != other.Player) names.Add("播放器");
         if (OffsetMs != other.OffsetMs) names.Add("偏移");
         if (Width != other.Width) names.Add("宽度");
         if (Hold != other.Hold) names.Add("分页停留");
@@ -95,18 +96,20 @@ internal sealed class DesktopSession
         lock (sync)
         {
             if (value is null || !state.Running || state.Stopping || state.Track != value.Track || state.AttemptId != value.AttemptId) return;
-            state = state with { Busy = false, Check = state.NetworkBlocked ? "本次运行网络已锁止；停止后重新开始" : result,
+            state = state with { Busy = false, Check = state.NetworkBlocked ? state.Check : result,
                 CooldownUntil = now + TimeSpan.FromSeconds(3) };
         }
     }
     // 旧曲目的迟到权限/网络错误仍锁止同一次运行，但不能影响另一次运行。
-    internal void BlockNetwork(Guid runId)
+    internal void BlockNetwork(Guid runId, string? reason = null)
     {
         lock (sync)
         {
             if (!state.Running || state.RunId != runId) return;
             command = null;
-            state = state with { NetworkBlocked = true, Check = "权限或网络故障：本次运行禁止后续联网；请停止再开始" };
+            state = state with { NetworkBlocked = true, Check = reason is null
+                ? "权限或网络故障：本次运行禁止后续联网；请停止再开始"
+                : reason + "；本次联网已锁止，请停止后重新开始" };
         }
     }
     internal void Stop()
