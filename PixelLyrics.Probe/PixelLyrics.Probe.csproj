@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <UseAppHost>true</UseAppHost>
+    <AppHostDotNetSearch>AppRelative;EnvironmentVariable;Global</AppHostDotNetSearch>
+    <AppHostRelativeDotNet>../../../../.tools/dotnet</AppHostRelativeDotNet>
+    <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
+    <DisableWinExeOutputInference>true</DisableWinExeOutputInference>
+    <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <!-- The SDK applies runtime search settings only during publish; the launcher uses build output. -->
+  <Target Name="ConfigureBuildAppHostRuntimeSearch" AfterTargets="_CreateAppHost"
+          Condition="'$(UseAppHost)' == 'true' and Exists('$(AppHostSourcePath)') and Exists('@(IntermediateAssembly)')">
+    <CreateAppHost AppHostSourcePath="$(AppHostSourcePath)"
+                   AppHostDestinationPath="$(AppHostIntermediatePath)"
+                   AppBinaryName="$(AssemblyName)$(TargetExt)"
+                   IntermediateAssembly="@(IntermediateAssembly->'%(FullPath)')"
+                   WindowsGraphicalUserInterface="$(_UseWindowsGraphicalUserInterface)"
+                   DotNetSearchLocations="$(AppHostDotNetSearch)"
+                   AppRelativeDotNet="$(AppHostRelativeDotNet)" />
+  </Target>
+  <ItemGroup>
+    <None Update="Assets/pixellyrics.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <Using Remove="System.Windows.Forms" />
+    <Using Remove="System.Drawing" />
+    <ProjectReference Include="../PixelLyrics.Core/PixelLyrics.Core.csproj" />
+    <ProjectReference Include="../PixelLyrics.OnlineProbe/PixelLyrics.OnlineProbe.csproj" />
+    <ProjectReference Include="../vendor-pixelbar/src/PixelBar.Sdk/PixelBar.Sdk.csproj" />
+    <None Include="../vendor-pixelbar/LICENSE" Link="ThirdParty/PixelBar-LICENSE.txt"
+          TargetPath="ThirdParty/PixelBar-LICENSE.txt" CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

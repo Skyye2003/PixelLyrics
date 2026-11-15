@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256" shape-rendering="crispEdges">
+  <title>PixelLyrics</title>
+  <desc>深色像素显示屏，紫蓝歌词行与青绿色双音符。</desc>
+  <path fill="#7775FF" d="M32 16h192v16h16v176h-16v16H32v-16H16V32h16z"/>
+  <path fill="#121A36" d="M40 32h176v16h8v144h-16v16H48v-16H32V48h8z"/>
+  <path fill="#313B67" d="M64 224h128v16H64z"/>
+  <path fill="#AAA5FF" d="M48 64h80v16H48z"/>
+  <path fill="#7775FF" d="M48 96h64v16H48zM48 128h48v16H48z"/>
+  <path fill="#38E5CB" d="M144 64h48v16h-32v72h-16zM176 80h16v88h-16zM128 144h16v16h16v16h-32v-16h-16v-16zM160 160h16v16h16v16h-32v-16h-16v-16z"/>
+  <path fill="#38E5CB" d="M48 176h16v16H48z"/>
+  <path fill="#536392" d="M80 176h32v16H80z"/>
+</svg>

@@ -1,0 +1,15 @@
+**/bin/
+**/obj/
+.tools/
+.workbuddy/
+.vs/
+**/artifacts/
+*.user
+*.suo
+*.log
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+probe-settings*.json
