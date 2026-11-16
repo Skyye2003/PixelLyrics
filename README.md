@@ -48,7 +48,7 @@ dotnet run --project PixelLyrics.Tests/PixelLyrics.Tests.csproj -c Release
 dotnet run --project PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release -- --online --follow --player netease --duration 30
 ```
 
-本次预发布提供 PixelLyrics 自包含便携 EXE，不包含网易云组件安装器；未安装兼容进度组件时，不保证网易云同步可用。组件集成安装包、完整对应源码材料、干净环境安装/卸载以及真实 USB 同步验收尚未完成，因此尚不标记为 v0.2.0 正式版，也不宣称免插件原生支持。
+v0.2.0-rc.2 提供 [集成安装包](docs/bundled-installer.md)：Setup 内置主程序、BetterNCM、InfLink-rs 及 VC++ 离线运行库，通过可选组件一次安装，并修复桌面快捷方式及安装程序图标。当前为预发布版；干净环境安装和第三方对应源码材料完整性审核未完成，不标记为正式版。
 
 ### 原生兼容性诊断
 

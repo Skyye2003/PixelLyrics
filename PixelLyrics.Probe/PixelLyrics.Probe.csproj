@@ -1,6 +1,7 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <OutputType>WinExe</OutputType>
+    <ApplicationIcon>Assets/pixellyrics.ico</ApplicationIcon>
     <UseAppHost>true</UseAppHost>
     <AppHostDotNetSearch>AppRelative;EnvironmentVariable;Global</AppHostDotNetSearch>
     <AppHostRelativeDotNet>../../../../.tools/dotnet</AppHostRelativeDotNet>
