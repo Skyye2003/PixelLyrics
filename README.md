@@ -1,6 +1,6 @@
 # PixelLyrics
 
-Windows WPF 歌词屏应用：读取当前媒体曲目，在用户授权后获取歌词，并通过 PixelBar SDK 输出到 USB 歌词屏。已发布版本支持 QQ 音乐；当前开发代码增加网易云音乐接入，尚未完成发布验收。
+Windows WPF 歌词屏应用：读取当前媒体曲目，在用户授权后获取歌词，并通过 PixelBar SDK 输出到 USB 歌词屏。v0.2.0-rc.1 预发布版增加自动识别播放器、网易云音乐接入和运行中保存设置实时生效。网易云进度仍依赖下述组件组合。
 
 界面包含运行、显示和高级设置，支持浅深主题与自适应分栏。联网与输出需要用户明确授权，启动应用不会自动开始歌词同步。
 
@@ -13,7 +13,7 @@ dotnet build PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release
 .\Start-PixelLyrics.cmd
 ```
 
-启动脚本打开 Release 构建产物。仓库不包含 .NET SDK、编译产物或个人运行配置。可将本地 .NET 安装放在 `.tools/dotnet`，应用也支持系统安装的运行时。
+仓库只保留 `Start-PixelLyrics.cmd` 一个启动入口，优先打开 `release/win-x64/PixelLyrics.exe`，否则打开 Release 构建产物。仓库不包含 .NET SDK、编译产物或个人运行配置。可将本地 .NET 安装放在 `.tools/dotnet`，应用也支持系统安装的运行时。下载用户直接运行 EXE。
 
 ## 下载与打包
 
@@ -22,7 +22,7 @@ dotnet build PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release
 重新打包（Windows，.NET 10 SDK）：
 
 ```powershell
-dotnet publish PixelLyrics.Probe/PixelLyrics.Probe.csproj -p:PublishProfile=Windows-x64 -r win-x64 --self-contained true -p:Version=0.1.0 --source https://api.nuget.org/v3/index.json -o release/win-x64
+dotnet publish PixelLyrics.Probe/PixelLyrics.Probe.csproj -p:PublishProfile=Windows-x64 -r win-x64 --self-contained true -p:Version=0.2.0-rc.1 --source https://api.nuget.org/v3/index.json -o release/win-x64
 ```
 
 分发 EXE 时请一并提供 `vendor-pixelbar/LICENSE` 和 `THIRD_PARTY.md`；程序也将 PixelBar 许可证包含在单文件包内。
@@ -34,7 +34,7 @@ dotnet run --project PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release -- --
 dotnet run --project PixelLyrics.Tests/PixelLyrics.Tests.csproj -c Release
 ```
 
-## 网易云音乐（开发验证中）
+## 网易云音乐（预发布）
 
 运行页可选择「自动识别」「QQ 音乐」「网易云音乐」，运行中修改后点击「保存设置」即可应用。自动模式在唯一播放来源连续稳定一秒后跟随；两个播放器同时播放时保留已有来源，尚未绑定时提示手动选择并保存。QQ 与网易云绑定分别保存，不跨平台回退。网易云接口客户端内置于程序，无需 Node.js、代理服务、Cookie 或登录凭证。
 
@@ -48,7 +48,7 @@ dotnet run --project PixelLyrics.Tests/PixelLyrics.Tests.csproj -c Release
 dotnet run --project PixelLyrics.Probe/PixelLyrics.Probe.csproj -c Release -- --online --follow --player netease --duration 30
 ```
 
-网易云所需组件最终将随安装 EXE 交付；安装包、完整对应源码材料、干净环境安装/卸载以及真实 USB 同步验收尚未完成，当前不发布 v0.2.0，也不宣称免插件原生支持。
+本次预发布提供 PixelLyrics 自包含便携 EXE，不包含网易云组件安装器；未安装兼容进度组件时，不保证网易云同步可用。组件集成安装包、完整对应源码材料、干净环境安装/卸载以及真实 USB 同步验收尚未完成，因此尚不标记为 v0.2.0 正式版，也不宣称免插件原生支持。
 
 ### 原生兼容性诊断
 

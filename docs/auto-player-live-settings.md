@@ -4,7 +4,7 @@
 
 ## 测试入口
 
-仓库根目录运行 `Start-PixelLyrics-Auto-Test.cmd`，加载 `release/auto-live-test/PixelLyrics.Probe.dll`。该入口依赖仓库已有的 `.tools/dotnet` 运行时，不是本次发布的自包含 EXE。已有 PixelLyrics 实例需要先从托盘退出，新窗口才会加载新代码。新目录的设置独立存放；旧配置复制前先备份，缺少 Mode 字段时会保留原播放器选择。
+仓库只保留 `Start-PixelLyrics.cmd`：优先打开 `release/win-x64/PixelLyrics.exe` 自包含发布版，否则打开 Release 构建目录，使用本地 `.tools/dotnet` 或系统运行时。下载用户直接运行 EXE，无需启动脚本。已有 PixelLyrics 实例需要先从托盘退出，新窗口才会加载新代码。配置位于实际 EXE 目录，旧配置复制前先备份；缺少 Mode 字段时会保留原播放器选择。
 
 开始运行前先保存播放器与显示设置，再勾选本次授权。运行中修改偏移或播放器并保存，观察保存栏及诊断中的参数版本。只修改控件不应影响当前运行；重新加载也不直接应用。两个播放器都播放且尚无来源时，应手动选择一个播放器并保存。
 
