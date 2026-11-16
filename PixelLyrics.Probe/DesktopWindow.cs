@@ -13,7 +13,7 @@ using System.Windows.Threading;
 
 namespace PixelLyrics.Probe;
 
-internal sealed class DesktopWindow : Window, IDisposable
+internal sealed partial class DesktopWindow : Window, IDisposable
 {
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "desktop-settings.json");
     private readonly ComboBox _player = new() { Width = 180, DisplayMemberPath = "Value", SelectedValuePath = "Key" };
@@ -78,21 +78,21 @@ internal sealed class DesktopWindow : Window, IDisposable
     private readonly DesktopTheme _theme;
     private bool? _savedStartup;
     private string _configurationError = "";
-    private readonly TextBlock _title = Text("尚未开始");
-    private readonly TextBlock _artist = Text("");
+    private readonly TextBox _title = ScreenText("尚未开始", 32);
+    private readonly TextBox _artist = ScreenText("");
     private readonly TextBlock _playback = Text("");
-    private readonly TextBlock _check = Text("");
+    private readonly TextBox _check = ScreenText("");
     private readonly TextBlock _output = Text("");
-    private readonly TextBlock _headline = Text("未启用");
+    private readonly TextBox _headline = ScreenText("未启用");
     private readonly TextBlock _runtimeHint = Text("");
 
     public DesktopWindow(bool startInTray = false)
     {
         Title = "PixelLyrics · 歌词屏";
-        Width = 760;
-        Height = 850;
-        MinWidth = 640;
-        MinHeight = 640;
+        Width = 900;
+        Height = 620;
+        MinWidth = 860;
+        MinHeight = 600;
         WindowStartupLocation = WindowStartupLocation.CenterScreen;
         Width = Math.Min(Width, SystemParameters.WorkArea.Width);
         Height = Math.Min(Height, SystemParameters.WorkArea.Height);
@@ -102,105 +102,6 @@ internal sealed class DesktopWindow : Window, IDisposable
         FontSize = 14;
         UseLayoutRounding = true;
         _theme = new DesktopTheme(this);
-        var root = new DockPanel { Margin = new Thickness(24), MaxWidth = 1120 };
-        var header = new DockPanel { Margin = new Thickness(0, 0, 0, 16) };
-        var logo = new System.Windows.Controls.Image { Width = 40, Height = 40, Margin = new Thickness(0, 0, 12, 0), Source = AppIcon.CreateImage() };
-        Icon = logo.Source;
-        DockPanel.SetDock(logo, Dock.Left);
-        header.Children.Add(logo);
-        _headline.VerticalAlignment = VerticalAlignment.Center;
-        DockPanel.SetDock(_headline, Dock.Right);
-        header.Children.Add(_headline);
-        header.Children.Add(new TextBlock { Text = "PixelLyrics", FontSize = 24, FontWeight = FontWeights.SemiBold, VerticalAlignment = VerticalAlignment.Center });
-        DockPanel.SetDock(header, Dock.Top);
-        root.Children.Add(header);
-        var footer = new StackPanel { Margin = new Thickness(0, 12, 0, 0) };
-        var statusStyle = new Style(typeof(TextBlock));
-        var emptyStatus = new Trigger { Property = TextBlock.TextProperty, Value = "" };
-        emptyStatus.Setters.Add(new Setter(VisibilityProperty, Visibility.Collapsed));
-        statusStyle.Triggers.Add(emptyStatus);
-        _status.Style = statusStyle;
-        footer.Children.Add(_status);
-        var globalActions = new StackPanel { Orientation = Orientation.Horizontal };
-        globalActions.Children.Add(_reload);
-        globalActions.Children.Add(_save);
-        footer.Children.Add(InlineActions(_saveHint, globalActions, 600, true));
-        DockPanel.SetDock(footer, Dock.Bottom);
-        root.Children.Add(footer);
-        var tabs = new TabControl { Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0) };
-        tabs.SetResourceReference(Control.TemplateProperty, "PageTabsTemplate");
-        root.Children.Add(tabs);
-        StackPanel AddTab(string title)
-        {
-            var panel = new StackPanel();
-            panel.SetResourceReference(System.Windows.Documents.TextElement.ForegroundProperty, "TextBrush");
-            var viewer = new ScrollViewer { Content = panel, Padding = new Thickness(24), VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled };
-            double offset = 0;
-            viewer.ScrollChanged += (_, e) => { if (viewer.IsLoaded && e.VerticalChange != 0) offset = viewer.VerticalOffset; };
-            viewer.Loaded += (_, _) => viewer.ScrollToVerticalOffset(offset);
-            var item = new TabItem { Header = title, Content = viewer };
-            item.SetResourceReference(Control.StyleProperty, "PageTabStyle");
-            tabs.Items.Add(item);
-            return panel;
-        }
-        var body = AddTab("运行");
-        var displayTab = AddTab("显示");
-        var advancedTab = AddTab("高级");
-        var current = new StackPanel();
-        _title.FontSize = 22;
-        _title.FontWeight = FontWeights.SemiBold;
-        _title.SetResourceReference(TextBlock.ForegroundProperty, "TextBrush");
-        foreach (var block in new[] { _title, _artist, _playback }) current.Children.Add(block);
-        _recheck.SetResourceReference(Control.StyleProperty, "TextActionStyle");
-        current.Children.Add(InlineActions(_check, _recheck, 440));
-        current.Children.Add(_output);
-        var controls = new StackPanel();
-        _player.ItemsSource = Enum.GetValues<MusicPlayer>().Select(p => new KeyValuePair<MusicPlayer, string>(p, p.DisplayName()));
-        _player.SelectedValue = MusicPlayer.QQMusic;
-        var playerLabel = new Label { Content = "播放器", Target = _player, Padding = new Thickness(0, 0, 0, 6) };
-        AutomationProperties.SetName(_player, "播放器");
-        _player.HorizontalAlignment = HorizontalAlignment.Left;
-        _player.Margin = new Thickness(0, 0, 0, 12);
-        controls.Children.Add(playerLabel);
-        controls.Children.Add(_player);
-        string authorization = "允许本次联网获取 QQ 音乐歌词并输出到 USB 歌词屏";
-        _authorization.Content = new TextBlock { Text = authorization, TextWrapping = TextWrapping.Wrap };
-        AutomationProperties.SetName(_authorization, authorization);
-        controls.Children.Add(_authorization);
-        var actions = new WrapPanel();
-        _start.SetResourceReference(Control.BackgroundProperty, "AccentBrush");
-        _start.SetResourceReference(Control.ForegroundProperty, "AccentTextBrush");
-        actions.Children.Add(_start);
-        actions.Children.Add(_stop);
-        controls.Children.Add(actions);
-        body.Children.Add(Columns(Card("当前曲目", current), Card("运行", controls), 3, 2));
-        var diagnostics = new StackPanel();
-        diagnostics.Children.Add(_sessionPanel);
-        diagnostics.Children.Add(_parameterHint);
-        diagnostics.Children.Add(Text("安全日志 · 最多 150 行 · 不显示歌词正文"));
-        diagnostics.Children.Add(_logs);
-        _logs.SetResourceReference(Control.BackgroundProperty, "CardBrush");
-        _logs.SetResourceReference(Control.ForegroundProperty, "TextBrush");
-        AutomationProperties.SetName(_logs, "安全日志");
-        body.Children.Add(new Expander { Header = "诊断详情", Content = diagnostics, Margin = new Thickness(0, 16, 0, 0) });
-        displayTab.Children.Add(_runtimeHint);
-        var timing = new StackPanel();
-        var timingTitle = new TextBlock { Text = "同步微调", FontSize = 16, FontWeight = FontWeights.SemiBold };
-        timingTitle.SetResourceReference(TextBlock.ForegroundProperty, "TextBrush");
-        timing.Children.Add(InlineActions(timingTitle, _offsetText, 0));
-        AutomationProperties.SetName(_offset, "歌词时间偏移（毫秒）");
-        timing.Children.Add(_offset);
-        var steps = new WrapPanel();
-        var earlier = MakeButton("提前 100 ms");
-        var later = MakeButton("延后 100 ms");
-        steps.Children.Add(earlier);
-        steps.Children.Add(later);
-        var resetOffset = MakeButton("归零");
-        resetOffset.Click += (_, _) => _offset.Value = 0;
-        steps.Children.Add(resetOffset);
-        timing.Children.Add(InlineActions(Text("负值提前，正值延后"), steps, 660));
-        displayTab.Children.Add(timing);
-        displayTab.Children.Add(Divider());
         for (int units = 8; units <= 64; units++) _width.Items.Add(units);
         for (int ms = 500; ms <= 10000; ms += 100) _hold.Items.Add(ms);
         for (int style = 1; style <= 11; style++) _clockStyle.Items.Add(style);
@@ -219,44 +120,7 @@ internal sealed class DesktopWindow : Window, IDisposable
         _pollInterval.SelectedItem = 200;
         _trackSettle.SelectedItem = 600;
         _requestTimeout.SelectedItem = 10000;
-        var display = new StackPanel();
-        display.Children.Add(Setting("显示宽度", _width, "以英文字符估算宽度，汉字约占 2 单位；每段受 54 字节限制，并非物理像素测量。"));
-        display.Children.Add(Setting("每段停留（ms）", _hold));
-        display.Children.Add(_trackIntro);
-        display.Children.Add(Setting("开场时长（ms）", _trackIntroHold, "显示歌名与歌手，不暂停播放器；到期后跟随当前进度。启用后无词时不追加歌名停留。"));
-        ((FrameworkElement)display.Children[display.Children.Count - 1]).Margin = new Thickness(20, 6, 0, 6);
-        var clock = new StackPanel();
-        clock.Children.Add(Setting("时钟样式", _clockStyle));
-        clock.Children.Add(_idleClock);
-        clock.Children.Add(Setting("空闲等待（ms）", _idleClockDelay, "持续无会话或无可显示内容时返回时钟；暂停保留歌词，不触发回钟。网络或权限故障不视为无词。"));
-        ((FrameworkElement)clock.Children[clock.Children.Count - 1]).Margin = new Thickness(20, 6, 0, 6);
-        var clockActions = new WrapPanel();
-        clockActions.Children.Add(_clock);
-        clockActions.Children.Add(Info("时钟切换说明", "先停止歌词再发送时钟指令，不校准时间；实际设备显示待确认。"));
-        clock.Children.Add(clockActions);
-        clock.Children.Add(Text("恢复歌词需要重新授权并开始。"));
-        displayTab.Children.Add(Columns(Card("歌词显示", display), Card("时钟", clock)));
-        var advanced = new StackPanel();
-        advanced.Children.Add(Setting("无词停留（ms）", _noLyricsTitleHold, "无可信匹配或确认无词时生效；网络故障不视为无词。"));
-        advanced.Children.Add(Setting("会话轮询（ms）", _pollInterval));
-        advanced.Children.Add(Setting("曲目稳定等待（ms）", _trackSettle));
-        advanced.Children.Add(Setting("请求超时（ms）", _requestTimeout));
-        var startup = new StackPanel();
-        startup.Children.Add(_loginStartup);
-        startup.Children.Add(Text("不会自动开始歌词同步"));
-        startup.Children.Add(_startupStatus);
-        _startupStatus.FontSize = 12;
-        advancedTab.Children.Add(Columns(Card("曲目跟随", advanced), Card("登录自启", startup)));
-        var details = new StackPanel();
-        details.Children.Add(_configuration);
-        details.Children.Add(Text(_settingsPath));
-        details.Children.Add(Text(@"自启独立存储于 HKCU\Software\Microsoft\Windows\CurrentVersion\Run 的 PixelLyrics 项；移动程序后重新保存以更新路径。"));
-        advancedTab.Children.Add(new Expander { Header = "配置详情", Content = details, Margin = new Thickness(0, 16, 0, 0) });
-        var exit = MakeButton("退出程序");
-        advancedTab.Children.Add(Divider());
-        exit.HorizontalAlignment = HorizontalAlignment.Right;
-        advancedTab.Children.Add(exit);
-        Content = root;
+        BuildConsoleLayout(out var earlier, out var later, out var exit);
 
         _trayMenu = new System.Windows.Forms.ContextMenuStrip();
         _trayMenu.Items.Add("打开控制台", null, (_, _) => Dispatch(ShowFromTray));
@@ -327,7 +191,7 @@ internal sealed class DesktopWindow : Window, IDisposable
 
     private static Button MakeButton(string text) => new()
     {
-        Content = text, Padding = new Thickness(16, 8, 16, 8), Margin = new Thickness(0, 8, 8, 8),
+        Content = text, Padding = new Thickness(16, 8, 16, 8), Margin = new Thickness(0, 0, 8, 0),
         MinHeight = 40, HorizontalAlignment = HorizontalAlignment.Left, Cursor = System.Windows.Input.Cursors.Hand
     };
 
@@ -343,23 +207,6 @@ internal sealed class DesktopWindow : Window, IDisposable
         return block;
     }
 
-    private static Border Card(string title, UIElement content)
-    {
-        var panel = new StackPanel();
-        var heading = new TextBlock { Text = title, FontSize = 16, FontWeight = FontWeights.SemiBold, Margin = new Thickness(0, 0, 0, 12) };
-        heading.SetResourceReference(TextBlock.ForegroundProperty, "TextBrush");
-        panel.Children.Add(heading);
-        panel.Children.Add(content);
-        return new Border { Child = panel, Margin = new Thickness(0, 0, 0, 16), VerticalAlignment = VerticalAlignment.Top };
-    }
-
-    private static Border Divider()
-    {
-        var line = new Border { Height = 1, Margin = new Thickness(0, 16, 0, 24) };
-        line.SetResourceReference(Border.BackgroundProperty, "BorderBrush");
-        return line;
-    }
-
     private static Grid Columns(FrameworkElement left, FrameworkElement right, double leftWeight = 1, double rightWeight = 1)
     {
         var grid = new Grid();
@@ -372,7 +219,7 @@ internal sealed class DesktopWindow : Window, IDisposable
         grid.Children.Add(right);
         grid.SizeChanged += (_, _) =>
         {
-            bool wide = grid.ActualWidth >= 880;
+            bool wide = grid.ActualWidth >= 700;
             grid.ColumnDefinitions[0].Width = new GridLength(wide ? leftWeight : 1, GridUnitType.Star);
             grid.ColumnDefinitions[1].Width = new GridLength(wide ? 24 : 0);
             grid.ColumnDefinitions[2].Width = wide ? new GridLength(rightWeight, GridUnitType.Star) : new GridLength(0);
@@ -427,18 +274,24 @@ internal sealed class DesktopWindow : Window, IDisposable
 
     private static Grid Setting(string title, Control control, string? hint = null)
     {
-        var row = new Grid { Margin = new Thickness(0, 6, 0, 6), HorizontalAlignment = HorizontalAlignment.Left };
-        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(174) });
+        var row = new Grid { Height = 40, HorizontalAlignment = HorizontalAlignment.Stretch };
+        row.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
         row.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
         row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         row.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
         var labelPanel = new StackPanel { Orientation = Orientation.Horizontal };
-        labelPanel.Children.Add(new Label { Content = title, Target = control, Padding = new Thickness(0, 6, 8, 6), VerticalAlignment = VerticalAlignment.Center });
+        var label = new Label { Content = title, Target = control, Padding = new Thickness(0, 6, 8, 6), VerticalAlignment = VerticalAlignment.Center };
+        label.SetResourceReference(Control.ForegroundProperty, "TextBrush");
+        labelPanel.Children.Add(label);
         if (hint is not null) labelPanel.Children.Add(Info(title + "说明", hint));
         AutomationProperties.SetName(control, title);
         row.Children.Add(labelPanel);
         row.Children.Add(control);
-        control.Width = 160;
+        control.Width = 124;
+        control.Height = 34;
+        control.VerticalAlignment = VerticalAlignment.Center;
+        control.SetResourceReference(Control.ForegroundProperty, "TextBrush");
+        control.SetResourceReference(Control.BackgroundProperty, "CardBrush");
         Grid.SetColumn(control, 1);
         return row;
     }
@@ -457,13 +310,14 @@ internal sealed class DesktopWindow : Window, IDisposable
         _saveHint.Text = _exiting ? "正在安全退出，请等待"
             : _configurationBusy ? "正在读取或保存设置…"
             : _configurationError.Length > 0 ? _configurationError
-            : !_settingsValid ? "配置不可用，请查看配置详情并重新加载"
+            : !_settingsValid ? "配置不可用，请在设置中重新加载"
             : dirty ? (_running || _stopping || _clockBusy ? "有未保存更改 · 停止后可保存" : "有未保存更改")
-            : "已保存";
+            : "";
         _save.ToolTip = _saveHint.Text;
         _runtimeHint.Text = pending ? "更改将在下次开始时生效" : "";
         _runtimeHint.Visibility = pending ? Visibility.Visible : Visibility.Collapsed;
-        _headline.Text = _exiting ? "安全退出中" : _stopping ? "停止中" : _clockBusy ? "切换时钟中" : _running ? "■ 运行中" : "未启用";
+        _headline.Text = _exiting ? "安全退出中" : _stopping ? "停止中" : _clockBusy ? "切换时钟中" : _running ? (_playback.Text.Length > 0 ? _playback.Text : "运行中") : "未启用";
+        RefreshPlaybackVisuals();
     }
 
     private DesktopParameters CaptureParameters() => DesktopParameters.From(CaptureRuntimeSettings()) with
@@ -477,13 +331,20 @@ internal sealed class DesktopWindow : Window, IDisposable
             && _session?.CanRecheck(_session.Clock.Elapsed) == true;
         _title.Text = s?.Title ?? (s?.Running == true ? $"等待 {SelectedPlayer.DisplayName()}播放" : "尚未开始");
         _artist.Text = s?.Artist ?? "";
+        _diagnosticValues[0].Text = (s?.Active?.Player ?? SelectedPlayer).DisplayName();
+        _diagnosticValues[1].Text = s?.RunId.ToString()[..8] ?? "尚未开始";
+        _diagnosticValues[2].Text = s?.Title ?? "—";
+        _diagnosticValues[3].Text = s is null ? "未启用" : s.Stopping ? "停止中" : s.Running ? "运行中" : "已结束";
+        _diagnosticValues[4].Text = s?.Check ?? "—";
+        _diagnosticValues[5].Text = s?.Display ?? "—";
         _artist.ToolTip = _artist.Text;
         string playback = s?.Playback switch { "Playing" => "播放中", "Paused" => "已暂停", "Stopped" => "已停止", "Closed" => "播放器已关闭", "Opened" => "等待播放", _ => s?.Playback ?? "" };
         _playback.Text = s is null ? "" : playback;
         _check.Text = s is null ? "" : "歌词 · " + s.Check;
-        _output.Text = s is null ? "" : "输出 · " + s.Display;
-        foreach (var text in new[] { _artist, _playback, _check, _output })
-            text.Visibility = text.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        _output.Text = s?.Display == "设备写入失败；实际显示未知" ? "设备写入失败，请停止后检查 USB 连接" : "";
+        _artist.Visibility = _artist.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        _check.Visibility = _check.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
+        _output.Visibility = _output.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         _recheck.Visibility = s is null ? Visibility.Collapsed : Visibility.Visible;
         RefreshSettingsFeedback();
         if (s is not null)
@@ -850,7 +711,7 @@ internal sealed class DesktopWindow : Window, IDisposable
     {
         if (Volatile.Read(ref _acceptLogs) == 0 || string.IsNullOrEmpty(message)) return;
         // 仅订阅主入口的安全日志事件，不捕获 Console 或异常正文。
-        string line = new(message.Take(400).Select(c => char.IsControl(c) ? ' ' : c).ToArray());
+        string line = $"[{DateTimeOffset.Now:yyyy-MM-dd HH:mm:ss zzz}] " + new string(message.Take(400).Select(c => char.IsControl(c) ? ' ' : c).ToArray());
         lock (_logLock)
         {
             if (_pendingLogs.Count == 150) _pendingLogs.Dequeue();

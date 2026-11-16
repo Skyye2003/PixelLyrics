@@ -48,7 +48,7 @@ internal static class Program
             }
             return 0;
         }
-        catch (Exception ex) when (ex is ProbeException or NoLyricsException or CandidateMetadataException or JsonException or HttpRequestException or OperationCanceledException or IOException or UnauthorizedAccessException or FormatException or ArgumentException)
+        catch (Exception ex) when (ex is ProbeException or NoLyricsException or UntimedLyricsException or CandidateMetadataException or JsonException or HttpRequestException or OperationCanceledException or IOException or UnauthorizedAccessException or FormatException or ArgumentException)
         {
             Console.Error.WriteLine("失败（不重试）：" + JsonSerializer.Serialize(ex.Message));
             return 1;
@@ -57,7 +57,7 @@ internal static class Program
 
 }
 
-public sealed class ProbeException(string message) : Exception(message);
+public class ProbeException(string message) : Exception(message);
 public sealed record Song(string Mid, string Name, string Singer);
 public sealed record VerifiedLyrics(string Text, LyricsDocument Document, IReadOnlyDictionary<string, string> Metadata);
 internal sealed record Options(string Title, string Artist, string? Album, double? Duration, string? SongMid, bool Preview, string? Output)

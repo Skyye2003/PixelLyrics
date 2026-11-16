@@ -66,6 +66,53 @@ internal static class NetEaseSelfTests
             session.Complete(attempt, "ignored", TimeSpan.Zero);
             Require(session.Latest.Check.Contains(reason) && session.Latest.NetworkBlocked);
         });
+        check("网易云：解析诊断保留行号及数字标签，不泄露歌词", () =>
+        {
+            foreach (string bad in new[] { "[00:12.00-2]private lyric", "[private lyric]private lyric", "private lyric" })
+            {
+                using var doc = JsonDocument.Parse(JsonSerializer.Serialize(new { code = 200, lrc = new { lyric = "[00:01.00]ok\n" + bad } }));
+                try { NetEaseLyricsClient.ParseLyrics(doc.RootElement); }
+                catch (NetEaseLrcException ex)
+                {
+                    string reason = FollowRunner.SafeFailureReason(ex);
+                    Require(reason.Contains("第 2 行") && !reason.Contains("private") && !reason.Contains("ok"));
+                    if (bad.StartsWith("[00:")) Require(reason.Contains("[00:12.00-2]"));
+                    continue;
+                }
+                throw new Exception();
+            }
+        });
+        check("网易云：真实括号正文不作为标签解析", () =>
+        {
+            // Public song 2677396501, line 8; keep the observed bracketed annotation.
+            string text = "[00:00.48][2022.8. 开学典礼前]\n[00:01.00][00:02.00]test";
+            using var doc = JsonDocument.Parse(JsonSerializer.Serialize(new { code = 200, lrc = new { lyric = text } }));
+            var result = NetEaseLyricsClient.ParseLyrics(doc.RootElement);
+            Require(result.Document.Lines.Count == 3);
+            Require(result.Document.Lines[0].Timestamp == TimeSpan.FromMilliseconds(480));
+            Require(result.Document.Lines[0].Text == "[2022.8. 开学典礼前]");
+            Require(LrcParser.Parse("[00:01.00][00:12.00-2]test").Errors.Count == 1);
+        });
+        check("网易云：无时间轴署名文本不锁止客户端", () =>
+        {
+            var handler = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+            { Content = new StringContent(JsonSerializer.Serialize(new { code = 200, lrc = new { lyric = "作曲 : Example\n\n编曲 Arranger: Example\n乐队 Orchestra: Example\n" } })) }));
+            using var client = new NetEaseLyricsClient(handler);
+            for (int i = 0; i < 2; i++)
+            {
+                try { client.FetchAsync("1913532412").GetAwaiter().GetResult(); }
+                catch (UntimedLyricsException) { continue; }
+                throw new Exception();
+            }
+            Require(handler.Calls == 2);
+        });
+        check("网易云：无标签正文混入定时歌词仍报错", () =>
+        {
+            using var doc = JsonDocument.Parse(JsonSerializer.Serialize(new { code = 200, lrc = new { lyric = "credit\n[00:01.00]test" } }));
+            try { NetEaseLyricsClient.ParseLyrics(doc.RootElement); }
+            catch (NetEaseLrcException ex) { Require(ex.Diagnostic.Contains("第 1 行")); return; }
+            throw new Exception();
+        });
         check("网易云：明确无歌词", () =>
         {
             using var doc = JsonDocument.Parse(JsonSerializer.Serialize(new { code = 200, nolyric = true }));

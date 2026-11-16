@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using PixelLyrics.Core;
 using Windows.Media.Control;
+using Microsoft.Win32;
 
 namespace PixelLyrics.Probe;
 
@@ -25,7 +26,8 @@ internal sealed record MediaSnapshot(SongIdentity Song, TimeSpan Position, TimeS
 internal sealed class MediaProbe : IDisposable
 {
     private readonly GlobalSystemMediaTransportControlsSessionManager manager;
-    private readonly GlobalSystemMediaTransportControlsSession? selected;
+    private GlobalSystemMediaTransportControlsSession? selected;
+    private int resumePending;
     private long revision;
     private readonly MusicPlayer player;
     internal string UnavailableReason
@@ -52,7 +54,18 @@ internal sealed class MediaProbe : IDisposable
             selected.MediaPropertiesChanged += OnMediaChanged;
         }
         else Console.WriteLine($"{player.DisplayName()}匹配数为 {matches.Length}，不自动选择或绑定歌词。");
+        SystemEvents.PowerModeChanged += OnPowerModeChanged;
     }
+
+    private void OnPowerModeChanged(object sender, PowerModeChangedEventArgs args)
+    {
+        if (args.Mode != PowerModes.Resume) return;
+        Interlocked.Increment(ref revision);
+        Interlocked.Exchange(ref resumePending, 1);
+    }
+
+    internal static T? SelectSession<T>(T? current, T[] matches, bool afterResume) where T : class =>
+        matches.Length == 1 && (afterResume || Equals(current, matches[0])) ? matches[0] : null;
 
     private void OnMediaChanged(GlobalSystemMediaTransportControlsSession sender, MediaPropertiesChangedEventArgs args) =>
         Interlocked.Increment(ref revision);
@@ -60,14 +73,23 @@ internal sealed class MediaProbe : IDisposable
     public async Task<MediaSnapshot?> ReadAsync(CancellationToken cancellationToken)
     {
         var matches = manager.GetSessions().Where(s => player.Matches(s.SourceAppUserModelId)).ToArray();
-        if (selected is null || matches.Length != 1 || !selected.Equals(matches[0])) return null;
+        if (Interlocked.Exchange(ref resumePending, 0) != 0)
+        {
+            if (selected is not null) selected.MediaPropertiesChanged -= OnMediaChanged;
+            selected = SelectSession(selected, matches, afterResume: true);
+            Interlocked.Increment(ref revision);
+            if (selected is not null) selected.MediaPropertiesChanged += OnMediaChanged;
+            else Interlocked.Exchange(ref resumePending, 1);
+        }
+        var active = SelectSession(selected, matches, afterResume: false);
+        if (active is null) return null;
         long before = Interlocked.Read(ref revision);
-        var first = await selected.TryGetMediaPropertiesAsync().AsTask(cancellationToken);
-        var timeline = selected.GetTimelineProperties();
+        var first = await active.TryGetMediaPropertiesAsync().AsTask(cancellationToken);
+        var timeline = active.GetTimelineProperties();
         var timelineAge = DateTimeOffset.UtcNow - timeline.LastUpdatedTime;
         long sampleTimestamp = Stopwatch.GetTimestamp();
-        var playback = selected.GetPlaybackInfo();
-        var second = await selected.TryGetMediaPropertiesAsync().AsTask(cancellationToken);
+        var playback = active.GetPlaybackInfo();
+        var second = await active.TryGetMediaPropertiesAsync().AsTask(cancellationToken);
         bool stable = before == Interlocked.Read(ref revision)
             && (player != MusicPlayer.NetEaseMusic || MusicPlayers.NetEaseId(first.Genres) == MusicPlayers.NetEaseId(second.Genres))
             && first.Title == second.Title && first.Artist == second.Artist && first.AlbumTitle == second.AlbumTitle
@@ -82,11 +104,13 @@ internal sealed class MediaProbe : IDisposable
     }
 
     public bool IsCurrent(MediaSnapshot snapshot) => snapshot.Revision == Interlocked.Read(ref revision)
+        && Volatile.Read(ref resumePending) == 0
         && selected is not null && manager.GetSessions().Where(s => player.Matches(s.SourceAppUserModelId)).ToArray() is var matches
         && matches.Length == 1 && selected.Equals(matches[0]);
 
     public void Dispose()
     {
+        SystemEvents.PowerModeChanged -= OnPowerModeChanged;
         if (selected is not null) selected.MediaPropertiesChanged -= OnMediaChanged;
     }
 }

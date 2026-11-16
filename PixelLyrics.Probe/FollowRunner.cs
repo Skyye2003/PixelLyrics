@@ -102,7 +102,11 @@ internal static class FollowRunner
             catch (Exception ex) when (ex is ProbeException or HttpRequestException)
             {
                 Interlocked.Exchange(ref networkBlocked, 1);
-                session.BlockNetwork(runId);
+                string reason = ex is ProbeException protocol ? SafeFailureReason(protocol) : "网络请求失败";
+                string context = sourceSongId is { Length: > 0 and <= 19 } && sourceSongId.All(char.IsAsciiDigit)
+                    ? $"；歌曲 ID {sourceSongId}" : "";
+                session.BlockNetwork(runId, reason + context);
+                Program.ReportDesktopLog($"联网锁止：{reason}{context}；本次运行停止后续联网，请停止后重新开始。");
                 throw;
             }
         }
@@ -213,23 +217,26 @@ internal static class FollowRunner
                         Program.ReportDesktopLog(checkState + fallbackMessage);
                         await ArmFallbackAsync();
                     }
+                    catch (UntimedLyricsException)
+                    {
+                        checkState = "当前曲目没有可同步的时间轴";
+                        Program.ReportDesktopLog(checkState + "；不锁止联网，切歌后正常核对。" + fallbackMessage);
+                        await ArmFallbackAsync();
+                    }
                     catch (NoLyricsException)
                     {
                         checkState = "当前曲目无歌词";
                         Program.ReportDesktopLog(checkState + fallbackMessage);
                         await ArmFallbackAsync();
                     }
-                    catch (ProbeException ex)
+                    catch (ProbeException)
                     {
                         // Only locally defined, allowlisted categories are logged; never raw response text.
                         Interlocked.Exchange(ref networkBlocked, 1);
-                        session.BlockNetwork(runId, SafeFailureReason(ex));
-                        Program.ReportDesktopLog($"在线核对失败：{SafeFailureReason(ex)}；本次运行停止后续联网，不显示旧词。");
                     }
                     catch (HttpRequestException)
                     {
                         Interlocked.Exchange(ref networkBlocked, 1);
-                        Program.ReportDesktopLog("网络请求失败：本次运行停止后续联网，不自动重试。");
                     }
                     finally
                     {
@@ -355,6 +362,7 @@ internal static class FollowRunner
 
     internal static string SafeFailureReason(ProbeException error) => error.Message switch
     {
+        _ when error is NetEaseLrcException lrc => "网易云 LRC 解析失败：" + lrc.Diagnostic,
         "缺少歌词。" => "响应缺少歌词字段",
         "无歌词。" => "当前曲目返回空歌词",
         "缺少搜索列表。" => "搜索响应没有歌曲列表",

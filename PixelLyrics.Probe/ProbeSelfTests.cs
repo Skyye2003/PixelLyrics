@@ -34,6 +34,17 @@ internal static class ProbeSelfTests
             });
         SessionSelfTests.Register(Check);
         NetEaseSelfTests.Register(Check);
+        Check("休眠恢复：只重新绑定唯一会话，平时不切换会话", () =>
+        {
+            var oldSession = new object();
+            var replacement = new object();
+            if (MediaProbe.SelectSession(oldSession, new[] { replacement }, false) is not null
+                || MediaProbe.SelectSession(oldSession, new[] { replacement }, true) != replacement
+                || MediaProbe.SelectSession<object>(null, new[] { replacement }, true) != replacement
+                || MediaProbe.SelectSession(oldSession, Array.Empty<object>(), true) is not null
+                || MediaProbe.SelectSession(oldSession, new[] { oldSession, replacement }, true) is not null
+                || MediaProbe.SelectSession(oldSession, new[] { oldSession }, false) != oldSession) throw new Exception();
+        });
         Check("网易云诊断识别会话且不混入QQ", () =>
         {
             if (!NativeMediaDiagnostic.IsNetEase("CloudMusic.exe")
@@ -510,6 +521,45 @@ internal static class ProbeSelfTests
                     if (plan.Text != text || plan.Effect != PixelBar.Sdk.Protocol.TextDisplayEffect.Static) throw new Exception();
                 }
             }
+        });
+        Check("英文分页保留整词及收尾标点", () =>
+        {
+            if (!LyricViewport.Pages("You are beautiful", 16).SequenceEqual(new[] { "You are", "beautiful" })
+                || !LyricViewport.Pages("Hello beautiful!", 12).SequenceEqual(new[] { "Hello", "beautiful!" })
+                || !LyricViewport.Pages("hello   world", 8).SequenceEqual(new[] { "hello", "world" })
+                || !LyricViewport.Pages("你好 beautiful 世界", 12).SequenceEqual(new[] { "你好", "beautiful 世", "界" })) throw new Exception();
+        });
+        Check("英文分页保留撇号音标及连字符", () =>
+        {
+            foreach (string word in new[] { "don't", "we’re", "café", "cafe\u0301", "well-known" })
+            {
+                var pages = LyricViewport.Pages("12345678901 " + word, 12);
+                if (pages.Count != 2 || pages[1] != word) throw new Exception(word);
+            }
+            if (!LyricViewport.Pages("one-two-three", 8).SequenceEqual(new[] { "one-two-", "three" })) throw new Exception();
+        });
+        Check("整词分页遵守双重容量且保持正文及播放时序", () =>
+        {
+            foreach (int width in new[] { 8, 32, 64 })
+            foreach (string text in new[] { "We’re singing beautiful songs, together!", "你好 café cafe\u0301 world! 世界", new string('A', 120), string.Concat(Enumerable.Repeat("é", 60)), "one-two-three-four-five-six" })
+            {
+                var pages = LyricViewport.Pages(text, width);
+                string WithoutSpace(string value) => string.Concat(value.Where(c => !char.IsWhiteSpace(c)));
+                if (WithoutSpace(string.Concat(pages)) != WithoutSpace(text)) throw new Exception();
+                foreach (string page in pages)
+                {
+                    int units = 0;
+                    var elements = System.Globalization.StringInfo.GetTextElementEnumerator(page);
+                    while (elements.MoveNext()) units += elements.GetTextElement().EnumerateRunes().Any(r => r.Value > 0xFF) ? 2 : 1;
+                    if (units > width || System.Text.Encoding.UTF8.GetByteCount(page) > PixelBar.Sdk.Protocol.TextReportEncoder.MaxUtf8Bytes
+                        || page.Length == 0 || page != page.Trim()) throw new Exception();
+                }
+            }
+            const string lyric = "You are beautiful";
+            if (LyricViewport.Frame(lyric, TimeSpan.FromMilliseconds(2799), 16) != "You are"
+                || LyricViewport.Frame(lyric, TimeSpan.FromMilliseconds(2800), 16) != "beautiful"
+                || LyricViewport.Frame(lyric, TimeSpan.FromMinutes(1), 16) != "beautiful"
+                || LyricViewport.Frame(lyric, TimeSpan.Zero, 16) != "You are") throw new Exception();
         });
         Check("十七汉字分页且首屏停留两秒八", () =>
         {

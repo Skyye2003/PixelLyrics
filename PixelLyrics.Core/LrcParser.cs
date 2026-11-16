@@ -55,6 +55,12 @@ public static class LrcParser
                     break;
                 }
                 string tag = input[(cursor + 1)..close];
+                // Bracketed prose after a timestamp belongs to the lyric, not the tag list.
+                // Keep malformed time-like tags subject to validation.
+                if (times.Count > 0 && !TryTimestamp(tag, out _) && !IsMetadata(tag)
+                    && !tag.StartsWith("offset:", StringComparison.OrdinalIgnoreCase)
+                    && !Regex.IsMatch(tag, @"^\d+:", RegexOptions.CultureInvariant))
+                    break;
                 cursor = close + 1;
                 if (tag.StartsWith("offset:", StringComparison.OrdinalIgnoreCase))
                 {

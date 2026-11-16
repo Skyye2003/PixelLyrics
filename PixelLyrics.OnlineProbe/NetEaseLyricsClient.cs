@@ -4,6 +4,28 @@ using PixelLyrics.Core;
 
 namespace PixelLyrics.OnlineProbe;
 
+public sealed class UntimedLyricsException() : Exception("网易云返回无时间轴文本。");
+
+public sealed class NetEaseLrcException : ProbeException
+{
+    public string Diagnostic { get; }
+    internal NetEaseLrcException(LrcParseError? error) : base("网易云 LRC 无效。")
+    {
+        string reason = error is null ? "没有可显示的歌词行"
+            : error.Message.StartsWith("无效标签：", StringComparison.Ordinal) ? "时间标签或元数据标签不受支持"
+            : error.Message;
+        // Never include Source or arbitrary tag contents: both can contain lyric text.
+        string tag = "";
+        if (error is not null && error.Message.StartsWith("无效标签：", StringComparison.Ordinal))
+        {
+            string value = error.Message[5..].TrimEnd('。');
+            if (value.Length <= 48 && value.All(c => char.IsAsciiDigit(c) || "[]:.-+".Contains(c)))
+                tag = "（" + value + "）";
+        }
+        Diagnostic = error is null ? reason : $"第 {error.LineNumber} 行：{reason}{tag}";
+    }
+}
+
 // Site endpoints: anonymous requests only, no cookies, redirects, proxy or retries.
 public sealed class NetEaseLyricsClient : ILyricsSource
 {
@@ -42,6 +64,7 @@ public sealed class NetEaseLyricsClient : ILyricsSource
             return parse(root);
         }
         catch (NoLyricsException) { throw; }
+        catch (UntimedLyricsException) { throw; }
         catch (CandidateMetadataException) { throw; }
         catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
         { stopped = true; throw new ProbeException("网易云响应格式错误。"); }
@@ -84,13 +107,14 @@ public sealed class NetEaseLyricsClient : ILyricsSource
             throw new ProbeException("网易云响应缺少 LRC。");
         string text = lyric.GetString()!;
         if (string.IsNullOrWhiteSpace(text)) throw new NoLyricsException("网易云返回空歌词。");
+        if (!text.Contains('[') && !text.Contains(']')) throw new UntimedLyricsException();
         // NetEase's web player reads this observed tag as 0 seconds (parseFloat("00.00-1")).
         // Only normalize the verified spelling, at a line's leading tag; keep other malformed tags invalid.
         string normalized = string.Join("\n", text.Replace("\r\n", "\n").Replace('\r', '\n').Split('\n').Select(line =>
             line.StartsWith("[00:00.00-1]", StringComparison.Ordinal) ? "[00:00.00]" + line[12..] : line));
         var parsed = LrcParser.Parse(normalized);
         if (parsed.Errors.Count != 0 || !parsed.Document.Lines.Any(l => !string.IsNullOrWhiteSpace(l.Text)))
-            throw new ProbeException("网易云 LRC 无效。");
+            throw new NetEaseLrcException(parsed.Errors.FirstOrDefault());
         return new(text, parsed.Document, new Dictionary<string, string>());
     }
     public async Task<SongSelection> RecallAsync(string title, string artist, string? album, double seconds,

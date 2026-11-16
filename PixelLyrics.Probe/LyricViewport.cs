@@ -26,6 +26,7 @@ internal static class LyricViewport
         var pages = new List<string>();
         var current = new StringBuilder();
         int width = 0, bytes = 0;
+        var elements = new List<string>();
         var iterator = StringInfo.GetTextElementEnumerator(text);
         while (iterator.MoveNext())
         {
@@ -33,15 +34,65 @@ internal static class LyricViewport
             if (element.EnumerateRunes().Any(Rune.IsControl)) continue;
             int size = Encoding.UTF8.GetByteCount(element);
             if (size > TextReportEncoder.MaxUtf8Bytes) { element = "�"; size = 3; }
-            int units = element.EnumerateRunes().Any(r => r.Value > 0xFF) ? 2 : 1;
-            if (current.Length > 0 && (width + units > widthUnits || bytes + size > TextReportEncoder.MaxUtf8Bytes))
-            {
-                pages.Add(current.ToString());
-                current.Clear(); width = 0; bytes = 0;
-            }
-            current.Append(element); width += units; bytes += size;
+            elements.Add(element);
         }
-        if (current.Length > 0) pages.Add(current.ToString());
+        static bool Word(string element) => element.EnumerateRunes().First() is var rune
+            && (Rune.IsDigit(rune) || Rune.IsLetter(rune) && rune.Value <= 0x024F);
+        static bool Space(string element) => element.EnumerateRunes().All(Rune.IsWhiteSpace);
+        static bool Connector(string element) => element is "'" or "’" or "-" or "‐" or "‑";
+        static bool Closing(string element) => element is "," or "." or "!" or "?" or ":" or ";"
+            or "，" or "。" or "！" or "？" or "：" or "；" or ")" or "]" or "）" or "”";
+        static int Units(string element) => element.EnumerateRunes().Any(r => r.Value > 0xFF) ? 2 : 1;
+        bool Fits(IEnumerable<string> part, int usedWidth = 0, int usedBytes = 0) =>
+            usedWidth + part.Sum(Units) <= widthUnits
+            && usedBytes + part.Sum(Encoding.UTF8.GetByteCount) <= TextReportEncoder.MaxUtf8Bytes;
+        void Flush()
+        {
+            if (current.Length > 0) pages.Add(current.ToString());
+            current.Clear(); width = 0; bytes = 0;
+        }
+        void Append(IEnumerable<string> part)
+        {
+            foreach (string element in part)
+            {
+                current.Append(element); width += Units(element); bytes += Encoding.UTF8.GetByteCount(element);
+            }
+        }
+        var spaces = new List<string>();
+        for (int i = 0; i < elements.Count;)
+        {
+            if (Space(elements[i])) { spaces.Add(elements[i++]); continue; }
+            var token = new List<string> { elements[i++] };
+            if (Word(token[0]))
+                while (i < elements.Count && (Word(elements[i])
+                    || Connector(elements[i]) && i + 1 < elements.Count && Word(elements[i + 1])))
+                    token.Add(elements[i++]);
+            while (i < elements.Count && Closing(elements[i])) token.Add(elements[i++]);
+            var prefix = current.Length > 0 ? spaces : [];
+            if (!Fits(prefix.Concat(token), width, bytes))
+            {
+                Flush();
+                prefix = [];
+            }
+            Append(prefix);
+            spaces.Clear();
+            if (Fits(token)) { Append(token); continue; }
+            // An oversized word must split; prefer the last hyphen that fits.
+            while (token.Count > 0)
+            {
+                int count = 0;
+                while (count < token.Count && Fits(token.Take(count + 1), width, bytes)) count++;
+                if (count < token.Count)
+                {
+                    int hyphen = token.Take(count).ToList().FindLastIndex(e => e is "-" or "‐" or "‑");
+                    if (hyphen >= 0) count = hyphen + 1;
+                }
+                Append(token.Take(count));
+                token.RemoveRange(0, count);
+                if (token.Count > 0) Flush();
+            }
+        }
+        Flush();
         return pages;
     }
 }

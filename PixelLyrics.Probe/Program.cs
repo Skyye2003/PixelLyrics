@@ -120,6 +120,11 @@ internal static class Program
             Console.WriteLine("已取消。");
             return 0;
         }
+        catch (UntimedLyricsException)
+        {
+            Console.Error.WriteLine("当前曲目没有可同步的时间轴；不重试。");
+            return 4;
+        }
         catch (NoLyricsException)
         {
             Console.Error.WriteLine("当前曲目无歌词；不重试。");
