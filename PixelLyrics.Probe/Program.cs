@@ -28,7 +28,7 @@ internal static class Program
         if (save) arguments.Add("--save-settings");
         try
         {
-            ReportDesktopLog($"开始初始化设备和{(runtimeSettings?.Player ?? MusicPlayer.QQMusic).DisplayName()}媒体会话。");
+            ReportDesktopLog($"开始初始化设备和{(runtimeSettings?.Mode ?? PlayerMode.QQMusic).DisplayName()}媒体会话。");
             return await RunAsync(ProbeOptions.Parse(arguments.ToArray()), token, widthUnits, pageHoldMs, runtimeSettings, session).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
@@ -182,11 +182,12 @@ internal static class Program
     {
         var settings = ProbeSettings.LoadForRun(options);
         if (runtimeSettings is not null) settings.ApplyRuntimeOverrides(runtimeSettings);
-        options = options with { Player = settings.Player, OffsetMs = options.HasOffset ? options.OffsetMs : settings.OffsetMs };
-        if (settings.Player == MusicPlayer.NetEaseMusic && (options.SongMid is not null || options.ArtistAlias is not null || options.Accessibility || options.DesktopLyrics))
-            throw new ArgumentException("网易云不可使用 QQ 专用参数。");
+        options = options with { Player = settings.Player, OffsetMs = options.HasOffset ? options.OffsetMs : settings.OffsetMs, Mode = settings.Mode };
+        if (settings.Mode != PlayerMode.QQMusic && (options.SongMid is not null || options.ArtistAlias is not null || options.Accessibility || options.DesktopLyrics))
+            throw new ArgumentException("QQ 专用参数需要明确选择 QQ 音乐。");
         settings.DisplayWidthUnits = widthUnits ?? settings.DisplayWidthUnits;
         settings.PageHoldMs = pageHoldMs ?? settings.PageHoldMs;
+        settings.OffsetMs = options.OffsetMs;
         session?.Update(s => s with { Active = DesktopParameters.From(settings) });
         if (options.Accessibility) return DiagnoseAccessibility(cancellationToken);
         if (options.DesktopLyrics) return await DiagnoseDesktopLyricsAsync(options, cancellationToken);
@@ -202,9 +203,18 @@ internal static class Program
         if (options.TestScreen && !screen!.Test()) return 5;
 
         var manager = await GlobalSystemMediaTransportControlsSessionManager.RequestAsync().AsTask(cancellationToken);
-        using var media = new MediaProbe(manager, settings.Player);
+        using var media = new MediaProbe(manager, settings.Player) { Mode = settings.Mode };
         if (options.Follow) return await FollowRunner.RunAsync(options, media, screen, settings, cancellationToken, session);
         var initial = await media.ReadAsync(cancellationToken);
+        // 单次探测也遵守自动来源的一秒稳定窗口，不因首次采样尚未绑定而提前退出。
+        if (settings.Mode == PlayerMode.Auto && initial is null)
+        {
+            for (int sample = 0; sample < 5 && initial is null; sample++)
+            {
+                await Task.Delay(250, cancellationToken);
+                initial = await media.ReadAsync(cancellationToken);
+            }
+        }
         if (initial is not null) PrintTrack(initial);
         else Console.WriteLine(media.UnavailableReason);
 
@@ -231,7 +241,7 @@ internal static class Program
             Console.WriteLine($"已在内存绑定 {lyrics.Lines.Count} 行歌词至启动时曲目；不会自动绑定后续曲目。");
         }
 
-        if (options.Online && settings.Player == MusicPlayer.NetEaseMusic)
+        if (options.Online && initial?.Player == MusicPlayer.NetEaseMusic)
         {
             if (initial is null || !initial.Stable || initial.GetPosition() is null || !media.IsCurrent(initial)) return 4;
             async Task EnsureNetEaseUnchanged()
@@ -243,7 +253,7 @@ internal static class Program
             }
             var loaded = await FollowRunner.LoadAsync(initial.Song,
                 settings.NetEaseBindings.TryGetValue(initial.Song.Id, out var id) ? new(id) : null,
-                cancellationToken, requestTimeoutMs: settings.RequestTimeoutMs, player: settings.Player, sourceSongId: initial.SourceSongId,
+                cancellationToken, requestTimeoutMs: settings.RequestTimeoutMs, player: initial.Player, sourceSongId: initial.SourceSongId,
                 beforeRequest: EnsureNetEaseUnchanged);
             var check = await media.ReadAsync(cancellationToken);
             if (check is null || !check.Stable || check.Song != initial.Song || check.SourceSongId != initial.SourceSongId
@@ -255,6 +265,7 @@ internal static class Program
         }
         else if (options.Online)
         {
+            if (initial is null || initial.Player != MusicPlayer.QQMusic) return 4;
             Console.WriteLine("--online 授权：向 QQ音乐发送启动歌名、歌手和 MID 以搜索、核对详情及取普通 LRC；不发送 Cookie/凭据/播放进度，不代理、不重定向、不重试。默认仅预览，只有 --send 才写屏。");
             if (initial is null || !initial.Stable || !media.IsCurrent(initial)
                 || string.IsNullOrWhiteSpace(initial.Song.Artist) || string.IsNullOrWhiteSpace(initial.Song.Album))

@@ -3,16 +3,24 @@ namespace PixelLyrics.Probe;
 // 参数按值比较；绑定、自启和授权不属于运行显示参数。
 internal sealed record DesktopParameters(int OffsetMs, int Width, int Hold, int ClockStyle,
     bool IdleClock, int IdleDelay, bool Intro, int IntroHold, int NoLyricsHold,
-    int Poll, int Settle, int Timeout, MusicPlayer Player = MusicPlayer.QQMusic)
+    int Poll, int Settle, int Timeout, MusicPlayer Player = MusicPlayer.QQMusic, PlayerMode Mode = PlayerMode.Auto)
 {
     internal static DesktopParameters From(ProbeSettings s) => new(s.OffsetMs, s.DisplayWidthUnits,
         s.PageHoldMs, s.ClockStyle, s.IdleClockEnabled, s.IdleClockDelayMs, s.TrackIntroEnabled,
-        s.TrackIntroHoldMs, s.NoLyricsTitleHoldMs, s.PollIntervalMs, s.TrackSettleMs, s.RequestTimeoutMs, s.Player);
+        s.TrackIntroHoldMs, s.NoLyricsTitleHoldMs, s.PollIntervalMs, s.TrackSettleMs, s.RequestTimeoutMs,
+        s.Mode == PlayerMode.NetEaseMusic ? MusicPlayer.NetEaseMusic : MusicPlayer.QQMusic, s.Mode);
+    internal void ApplyTo(ProbeSettings s)
+    {
+        s.Player = Player; s.Mode = Mode; s.OffsetMs = OffsetMs; s.DisplayWidthUnits = Width; s.PageHoldMs = Hold;
+        s.ClockStyle = ClockStyle; s.IdleClockEnabled = IdleClock; s.IdleClockDelayMs = IdleDelay;
+        s.TrackIntroEnabled = Intro; s.TrackIntroHoldMs = IntroHold; s.NoLyricsTitleHoldMs = NoLyricsHold;
+        s.PollIntervalMs = Poll; s.TrackSettleMs = Settle; s.RequestTimeoutMs = Timeout;
+    }
     internal string Differences(DesktopParameters? other)
     {
         if (other is null) return "无快照";
         var names = new List<string>();
-        if (Player != other.Player) names.Add("播放器");
+        if (Mode != other.Mode) names.Add("播放器");
         if (OffsetMs != other.OffsetMs) names.Add("偏移");
         if (Width != other.Width) names.Add("宽度");
         if (Hold != other.Hold) names.Add("分页停留");
@@ -33,7 +41,8 @@ internal sealed record DesktopSnapshot(Guid RunId, bool Running = true, bool Sto
     TrackVersion? Track = null, string? Title = null, string? Artist = null, string Playback = "未知",
     string Check = "初始化", string Display = "尚未输出；实际设备显示未确认", bool Busy = false,
     bool Settled = false, bool NetworkBlocked = false, TimeSpan CooldownUntil = default,
-    long AttemptId = 0, DesktopParameters? Active = null);
+    long AttemptId = 0, DesktopParameters? Active = null, MusicPlayer? Source = null,
+    long ParameterVersion = 0, string SourceNotice = "");
 
 // 每次运行独享；只有一个最新快照和一个待处理命令，不向 Dispatcher 堆积事件。
 internal sealed class DesktopSession
@@ -43,6 +52,59 @@ internal sealed class DesktopSession
     private DesktopSnapshot state;
     private TrackVersion? command;
     private long attempt;
+    private long parameterVersion;
+    private (long Version, DesktopParameters Parameters, TaskCompletionSource<bool> Completion)? configuration;
+    private readonly Dictionary<string, ProbeSongBinding> qqBindings = new();
+    private readonly Dictionary<string, string> netEaseBindings = new();
+    internal void RememberBindings(ProbeSettings settings)
+    {
+        lock (sync)
+        {
+            foreach (var pair in settings.Bindings) qqBindings[pair.Key] = pair.Value;
+            foreach (var pair in settings.NetEaseBindings) netEaseBindings[pair.Key] = pair.Value;
+        }
+    }
+    internal void MergeBindings(ProbeSettings settings)
+    {
+        lock (sync)
+        {
+            foreach (var pair in qqBindings) settings.Bindings[pair.Key] = pair.Value;
+            foreach (var pair in netEaseBindings) settings.NetEaseBindings[pair.Key] = pair.Value;
+        }
+    }
+    internal Task<bool> QueueParameters(DesktopParameters parameters)
+    {
+        lock (sync)
+        {
+            if (!state.Running || state.Stopping) return Task.FromResult(false);
+            if (configuration is not null) throw new InvalidOperationException("已有待应用的设置。");
+            var completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            configuration = (++parameterVersion, parameters, completion);
+            return completion.Task;
+        }
+    }
+    internal bool ApplyParameters(Action<DesktopParameters> apply)
+    {
+        lock (sync)
+        {
+            if (configuration is not { } next) return false;
+            configuration = null;
+            if (!state.Running || state.Stopping) { next.Completion.TrySetResult(false); return false; }
+            try
+            {
+                apply(next.Parameters);
+                state = state with { Active = next.Parameters, ParameterVersion = next.Version };
+                next.Completion.TrySetResult(true);
+                return true;
+            }
+            catch (Exception error) { next.Completion.TrySetException(error); throw; }
+        }
+    }
+    private void CancelParameters()
+    {
+        configuration?.Completion.TrySetResult(false);
+        configuration = null;
+    }
     internal DesktopSession() => state = new(Guid.NewGuid());
     internal DesktopSnapshot Latest { get { lock (sync) return state; } }
     internal void Update(Func<DesktopSnapshot, DesktopSnapshot> change)
@@ -114,10 +176,10 @@ internal sealed class DesktopSession
     }
     internal void Stop()
     {
-        lock (sync) { command = null; state = state with { Stopping = true }; }
+        lock (sync) { CancelParameters(); command = null; state = state with { Stopping = true }; }
     }
     internal void End()
     {
-        lock (sync) { command = null; state = state with { Running = false, Stopping = false, Busy = false, Settled = false }; }
+        lock (sync) { CancelParameters(); command = null; state = state with { Running = false, Stopping = false, Busy = false, Settled = false }; }
     }
 }

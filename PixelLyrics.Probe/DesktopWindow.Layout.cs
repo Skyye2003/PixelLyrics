@@ -1,4 +1,4 @@
-﻿using System.Windows;
+using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -120,12 +120,12 @@ internal sealed partial class DesktopWindow
         var playerText = new FrameworkElementFactory(typeof(TextBlock));
         playerText.SetBinding(TextBlock.TextProperty, new System.Windows.Data.Binding("Value"));
         playerTemplate.VisualTree = playerText; _player.ItemTemplate = playerTemplate;
-        _player.ItemsSource = Enum.GetValues<MusicPlayer>().Select(p => new KeyValuePair<MusicPlayer, string>(p, p.DisplayName())); _player.SelectedValue = MusicPlayer.QQMusic;
+        _player.ItemsSource = Enum.GetValues<PlayerMode>().Select(p => new KeyValuePair<PlayerMode, string>(p, p.DisplayName())); _player.SelectedValue = PlayerMode.Auto;
         var playerRow = new StackPanel { Orientation = Orientation.Horizontal };
         playerRow.Children.Add(new Label { Content = "播放器", Target = _player, Width = 88, Padding = new Thickness(0), VerticalAlignment = VerticalAlignment.Center });
         _player.Width = 180; _player.Height = 34; AutomationProperties.SetName(_player, "播放器"); playerRow.Children.Add(_player);
-        _authorization.Content = new TextBlock { Text = "允许本次联网获取 QQ 音乐歌词并输出到 USB 歌词屏", TextWrapping = TextWrapping.Wrap };
-        _authorization.Margin = new Thickness(0, 12, 0, 0); AutomationProperties.SetName(_authorization, "允许本次联网获取 QQ 音乐歌词并输出到 USB 歌词屏");
+        _authorization.Content = new TextBlock { Text = "允许本次联网获取 QQ、网易云音乐歌词并输出到 USB 歌词屏", TextWrapping = TextWrapping.Wrap };
+        _authorization.Margin = new Thickness(0, 12, 0, 0); AutomationProperties.SetName(_authorization, "允许本次联网获取 QQ、网易云音乐歌词并输出到 USB 歌词屏");
         IconLabel(_start, "\uE768", "开始运行"); IconLabel(_stop, "\uE71A", "停止并清屏"); IconLabel(_recheck, "\uE72C", "重新核对曲目");
         _start.Width = 136; _stop.Width = 136;
         _start.SetResourceReference(StyleProperty, "PrimaryButtonStyle");

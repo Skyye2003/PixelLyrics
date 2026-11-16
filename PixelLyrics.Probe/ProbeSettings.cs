@@ -10,6 +10,7 @@ internal sealed class ProbeSettings
 {
     internal const int MaxFileBytes = 1024 * 1024;
     public MusicPlayer Player { get; set; }
+    public PlayerMode Mode { get; set; } = PlayerMode.Auto;
     public Dictionary<string, string> NetEaseBindings { get; } = new(StringComparer.Ordinal);
 
     public int OffsetMs { get; set; }
@@ -45,13 +46,17 @@ internal sealed class ProbeSettings
         try
         {
             using JsonDocument document = JsonDocument.Parse(data.ToArray());
-            var settings = new ProbeSettings();
+            var settings = new ProbeSettings { Mode = PlayerMode.QQMusic };
             var fields = new HashSet<string>(StringComparer.Ordinal);
             foreach (JsonProperty property in document.RootElement.EnumerateObject())
             {
                 if (!fields.Add(property.Name)) throw new InvalidDataException("配置字段重复。");
                 switch (property.Name)
                 {
+                    case nameof(Mode):
+                        settings.Mode = property.Value.GetString() switch { "Auto" => PlayerMode.Auto, "QQMusic" => PlayerMode.QQMusic,
+                            "NetEaseMusic" => PlayerMode.NetEaseMusic, _ => throw new InvalidDataException("播放器模式无效。") };
+                        break;
                     case nameof(Player):
                         settings.Player = property.Value.GetString() switch { "QQMusic" => MusicPlayer.QQMusic, "NetEaseMusic" => MusicPlayer.NetEaseMusic, _ => throw new InvalidDataException("播放器配置无效。") };
                         break;
@@ -93,6 +98,7 @@ internal sealed class ProbeSettings
                     default: throw new InvalidDataException("未知配置字段。");
                 }
             }
+            if (!fields.Contains(nameof(Mode))) settings.Mode = settings.Player.Mode();
             settings.Validate();
             return settings;
         }
@@ -108,7 +114,7 @@ internal sealed class ProbeSettings
         if (options.SaveSettings && options.SettingsPath is null)
             throw new ArgumentException("保存配置必须指定路径。", nameof(options));
         ProbeSettings settings = options.SettingsPath is null ? new() : Load(options.SettingsPath);
-        if (options.HasPlayer) settings.Player = options.Player;
+        if (options.HasPlayer || options.SettingsPath is null) { settings.Player = options.Player; settings.Mode = options.Mode; }
         if (options.HasOffset)
         {
             settings.OffsetMs = options.OffsetMs;
@@ -132,7 +138,7 @@ internal sealed class ProbeSettings
         string fullPath = LocalPath(path);
         string directory = Path.GetDirectoryName(fullPath)!;
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException("配置父目录必须已存在。");
-        byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { Player = Player.ToString(), NetEaseBindings, OffsetMs, DisplayWidthUnits, PageHoldMs, ClockStyle, IdleClockEnabled, IdleClockDelayMs, TrackIntroEnabled, TrackIntroHoldMs, NoLyricsTitleHoldMs, PollIntervalMs, TrackSettleMs, RequestTimeoutMs, Bindings }, new JsonSerializerOptions { WriteIndented = true });
+        byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { Mode = Mode.ToString(), Player = Player.ToString(), NetEaseBindings, OffsetMs, DisplayWidthUnits, PageHoldMs, ClockStyle, IdleClockEnabled, IdleClockDelayMs, TrackIntroEnabled, TrackIntroHoldMs, NoLyricsTitleHoldMs, PollIntervalMs, TrackSettleMs, RequestTimeoutMs, Bindings }, new JsonSerializerOptions { WriteIndented = true });
         if (json.Length > MaxFileBytes) throw new InvalidDataException("配置超过 1MiB 上限。");
         string temporary = Path.Combine(directory, ".probe-settings-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
@@ -155,6 +161,7 @@ internal sealed class ProbeSettings
     {
         overrides.Validate();
         Player = overrides.Player;
+        Mode = overrides.Mode;
         TrackIntroEnabled = overrides.TrackIntroEnabled;
         TrackIntroHoldMs = overrides.TrackIntroHoldMs;
         ClockStyle = overrides.ClockStyle;
@@ -168,6 +175,7 @@ internal sealed class ProbeSettings
 
     private void Validate()
     {
+        if (!Enum.IsDefined(Mode)) throw new InvalidDataException("播放器模式无效。");
         if (!Enum.IsDefined(Player)) throw new InvalidDataException("播放器配置无效。");
         foreach (var binding in NetEaseBindings)
         {

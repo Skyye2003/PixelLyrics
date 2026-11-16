@@ -7,7 +7,8 @@ namespace PixelLyrics.Probe;
 
 internal sealed record MediaSnapshot(SongIdentity Song, TimeSpan Position, TimeSpan Start,
     TimeSpan End, DateTimeOffset Updated, GlobalSystemMediaTransportControlsSessionPlaybackStatus Status,
-    double Rate, long Revision, bool Stable, TimeSpan TimelineAgeAtSample, long SampleTimestamp, string? SourceSongId = null)
+    double Rate, long Revision, bool Stable, TimeSpan TimelineAgeAtSample, long SampleTimestamp, string? SourceSongId = null,
+    MusicPlayer Player = MusicPlayer.QQMusic)
 {
     public TimeSpan TimelineAge => TimelineAgeAtSample + Stopwatch.GetElapsedTime(SampleTimestamp);
     public bool IsStale => TimelineAge > TimeSpan.FromSeconds(5);
@@ -29,14 +30,20 @@ internal sealed class MediaProbe : IDisposable
     private GlobalSystemMediaTransportControlsSession? selected;
     private int resumePending;
     private long revision;
-    private readonly MusicPlayer player;
+    private MusicPlayer player;
+    internal PlayerMode Mode { get; set; }
+    private readonly PlayerSelector selector = new();
+    private readonly Stopwatch clock = Stopwatch.StartNew();
+    private readonly SemaphoreSlim reads = new(1, 1);
+    internal string Notice => selector.Notice;
     internal string UnavailableReason
     {
         get
         {
+            if (selector.Bound is null) return selector.Notice;
             int count = manager.GetSessions().Count(s => player.Matches(s.SourceAppUserModelId));
-            return count != 1 ? $"{player.DisplayName()}会话匹配数为 {count}；请保留一个播放会话后停止并重新开始"
-                : $"{player.DisplayName()}会话或进度不可用；请确认进度组件兼容并停止后重新开始";
+            return count != 1 ? $"{player.DisplayName()}会话匹配数为 {count}；请保留一个播放会话"
+                : $"{player.DisplayName()}会话或进度不可用；请确认进度组件兼容";
         }
     }
 
@@ -44,6 +51,7 @@ internal sealed class MediaProbe : IDisposable
     {
         this.manager = manager;
         this.player = player;
+        Mode = player.Mode();
         var sessions = manager.GetSessions();
         Console.WriteLine($"媒体会话：{sessions.Count}");
         foreach (var session in sessions) Console.WriteLine($"  AppId={session.SourceAppUserModelId}");
@@ -72,7 +80,22 @@ internal sealed class MediaProbe : IDisposable
 
     public async Task<MediaSnapshot?> ReadAsync(CancellationToken cancellationToken)
     {
+        await reads.WaitAsync(cancellationToken);
+        try { return await ReadCoreAsync(cancellationToken); }
+        finally { reads.Release(); }
+    }
+
+    private async Task<MediaSnapshot?> ReadCoreAsync(CancellationToken cancellationToken)
+    {
+        var sessions = manager.GetSessions();
+        bool Playing(MusicPlayer source) => sessions.Any(s => source.Matches(s.SourceAppUserModelId)
+            && s.GetPlaybackInfo().PlaybackStatus == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Playing);
+        var source = selector.Observe(Mode, Playing(MusicPlayer.QQMusic), Playing(MusicPlayer.NetEaseMusic), clock.Elapsed);
+        if (source is null) return null;
+        if (player != source) { player = source.Value; Interlocked.Exchange(ref resumePending, 1); }
         var matches = manager.GetSessions().Where(s => player.Matches(s.SourceAppUserModelId)).ToArray();
+        if (matches.Length != 1 || selected is null || !selected.Equals(matches[0]))
+            Interlocked.Exchange(ref resumePending, 1);
         if (Interlocked.Exchange(ref resumePending, 0) != 0)
         {
             if (selected is not null) selected.MediaPropertiesChanged -= OnMediaChanged;
@@ -100,10 +123,11 @@ internal sealed class MediaProbe : IDisposable
         return new(new SongIdentity(second.Title, second.Artist, second.AlbumTitle, duration),
             timeline.Position, timeline.StartTime, timeline.EndTime, timeline.LastUpdatedTime,
             playback.PlaybackStatus, playback.PlaybackRate ?? 1d, before, stable, timelineAge, sampleTimestamp,
-            player == MusicPlayer.NetEaseMusic ? MusicPlayers.NetEaseId(second.Genres) : null);
+            player == MusicPlayer.NetEaseMusic ? MusicPlayers.NetEaseId(second.Genres) : null, player);
     }
 
     public bool IsCurrent(MediaSnapshot snapshot) => snapshot.Revision == Interlocked.Read(ref revision)
+        && snapshot.Player == player
         && Volatile.Read(ref resumePending) == 0
         && selected is not null && manager.GetSessions().Where(s => player.Matches(s.SourceAppUserModelId)).ToArray() is var matches
         && matches.Length == 1 && selected.Equals(matches[0]);

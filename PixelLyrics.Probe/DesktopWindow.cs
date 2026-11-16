@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -17,8 +17,8 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 {
     private readonly string _settingsPath = Path.Combine(AppContext.BaseDirectory, "desktop-settings.json");
     private readonly ComboBox _player = new() { Width = 180, DisplayMemberPath = "Value", SelectedValuePath = "Key" };
-    private MusicPlayer SelectedPlayer => _player.SelectedValue is MusicPlayer player ? player : MusicPlayer.QQMusic;
-    private readonly CheckBox _authorization = new() { Content = "允许本次联网获取 QQ 音乐歌词并输出到 USB 歌词屏", IsChecked = false };
+    private PlayerMode SelectedPlayer => _player.SelectedValue is PlayerMode mode ? mode : PlayerMode.Auto;
+    private readonly CheckBox _authorization = new() { Content = "允许本次联网获取 QQ、网易云音乐歌词并输出到 USB 歌词屏", IsChecked = false };
     private readonly Button _start = MakeButton("开始运行");
     private readonly Button _stop = MakeButton("停止并清屏");
     private readonly Button _recheck = MakeButton("重新核对曲目");
@@ -143,8 +143,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
         _player.SelectionChanged += (_, _) =>
         {
-            _authorization.IsChecked = false;
-            string text = $"允许本次联网获取 {SelectedPlayer.DisplayName()}歌词并输出到 USB 歌词屏";
+            string text = "允许本次联网获取 QQ、网易云音乐歌词并输出到 USB 歌词屏";
             _authorization.Content = new TextBlock { Text = text, TextWrapping = TextWrapping.Wrap };
             AutomationProperties.SetName(_authorization, text);
             UpdateControls();
@@ -306,17 +305,17 @@ internal sealed partial class DesktopWindow : Window, IDisposable
     {
         if (_requestTimeout.SelectedItem is null) return;
         bool dirty = _savedParameters is not null && (CaptureParameters() != _savedParameters || _loginStartup.IsChecked != _savedStartup);
-        bool pending = _session?.Latest is { Running: true, Active: not null } snapshot && CaptureParameters() != snapshot.Active;
         _saveHint.Text = _exiting ? "正在安全退出，请等待"
-            : _configurationBusy ? "正在读取或保存设置…"
+            : _configurationBusy ? (_lastConfigurationResult == "已保存，正在应用" ? _lastConfigurationResult : "保存中")
             : _configurationError.Length > 0 ? _configurationError
+            : _lastConfigurationResult == "已保存并生效" && _session?.Latest.Display == "设备写入失败；实际显示未知" ? "参数已应用；设备写入失败，实际显示未知"
             : !_settingsValid ? "配置不可用，请在设置中重新加载"
-            : dirty ? (_running || _stopping || _clockBusy ? "有未保存更改 · 停止后可保存" : "有未保存更改")
-            : "";
+            : dirty ? "有未保存更改"
+            : _lastConfigurationResult.StartsWith("已保存") ? _lastConfigurationResult : "已保存";
         _save.ToolTip = _saveHint.Text;
-        _runtimeHint.Text = pending ? "更改将在下次开始时生效" : "";
-        _runtimeHint.Visibility = pending ? Visibility.Visible : Visibility.Collapsed;
-        _headline.Text = _exiting ? "安全退出中" : _stopping ? "停止中" : _clockBusy ? "切换时钟中" : _running ? (_playback.Text.Length > 0 ? _playback.Text : "运行中") : "未启用";
+        _runtimeHint.Text = "";
+        _runtimeHint.Visibility = Visibility.Collapsed;
+        _headline.Text = _exiting ? "安全退出中" : _stopping ? "停止中" : _clockBusy ? "切换时钟中" : _running ? (_session?.Latest.Playback switch { "Playing" => "播放中", "Paused" => "已暂停", _ => "运行中" }) : "未启用";
         RefreshPlaybackVisuals();
     }
 
@@ -329,9 +328,9 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         _displayedTrack = s?.Track;
         _recheck.IsEnabled = !_exiting && !_stopping && !_clockBusy && _running
             && _session?.CanRecheck(_session.Clock.Elapsed) == true;
-        _title.Text = s?.Title ?? (s?.Running == true ? $"等待 {SelectedPlayer.DisplayName()}播放" : "尚未开始");
+        _title.Text = s?.Title ?? (s?.Running == true ? "等待播放器开始播放" : "尚未开始");
         _artist.Text = s?.Artist ?? "";
-        _diagnosticValues[0].Text = (s?.Active?.Player ?? SelectedPlayer).DisplayName();
+        _diagnosticValues[0].Text = s?.Source?.DisplayName() ?? (s?.Running == true ? "等待识别" : SelectedPlayer.DisplayName());
         _diagnosticValues[1].Text = s?.RunId.ToString()[..8] ?? "尚未开始";
         _diagnosticValues[2].Text = s?.Title ?? "—";
         _diagnosticValues[3].Text = s is null ? "未启用" : s.Stopping ? "停止中" : s.Running ? "运行中" : "已结束";
@@ -339,7 +338,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         _diagnosticValues[5].Text = s?.Display ?? "—";
         _artist.ToolTip = _artist.Text;
         string playback = s?.Playback switch { "Playing" => "播放中", "Paused" => "已暂停", "Stopped" => "已停止", "Closed" => "播放器已关闭", "Opened" => "等待播放", _ => s?.Playback ?? "" };
-        _playback.Text = s is null ? "" : playback;
+        _playback.Text = s is null ? "" : string.Join(" · ", new[] { s.Source?.DisplayName(), playback, s.SourceNotice }.Where(v => !string.IsNullOrWhiteSpace(v)));
         _check.Text = s is null ? "" : "歌词 · " + s.Check;
         _output.Text = s?.Display == "设备写入失败；实际显示未知" ? "设备写入失败，请停止后检查 USB 连接" : "";
         _artist.Visibility = _artist.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
@@ -348,14 +347,14 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         _recheck.Visibility = s is null ? Visibility.Collapsed : Visibility.Visible;
         RefreshSettingsFeedback();
         if (s is not null)
-            _sessionPanel.Text = $"播放器及歌词来源：{(s.Active?.Player ?? SelectedPlayer).DisplayName()}\n会话 {s.RunId.ToString()[..8]} · {(s.Running ? s.Stopping ? "停止中" : "运行中" : "已结束")}\n"
+            _sessionPanel.Text = $"播放器及歌词来源：{(s.Source?.DisplayName() ?? "等待识别")}\n会话 {s.RunId.ToString()[..8]} · {(s.Running ? s.Stopping ? "停止中" : "运行中" : "已结束")}\n"
                 + $"曲目：{s.Title ?? "不可用"} / {s.Artist ?? "未知"} · {s.Playback}\n"
                 + $"核对：{s.Check} · attempt {s.AttemptId} · {(s.Busy ? "忙碌" : _session!.Clock.Elapsed < s.CooldownUntil ? "冷却中" : "空闲")}\n"
                 + $"输出：{s.Display}";
         if (_width.SelectedItem is null || _hold.SelectedItem is null || _requestTimeout.SelectedItem is null) return;
         var draft = CaptureParameters();
         _parameterHint.Text = $"编辑值 ↔ 已保存：{draft.Differences(_savedParameters)}\n"
-            + (s?.Running == true ? $"编辑值 ↔ 本次运行：{draft.Differences(s.Active)}（差异下次开始生效）\n已保存 ↔ 本次运行：{_savedParameters?.Differences(s.Active) ?? "无快照"}" : "本次运行值：当前未运行")
+            + (s?.Running == true ? $"编辑值 ↔ 本次运行：{draft.Differences(s.Active)}（保存后应用）\n已保存 ↔ 本次运行：{_savedParameters?.Differences(s.Active) ?? "无快照"} · 版本 {s.ParameterVersion}" : "本次运行值：当前未运行")
             + "\n自启独立于 JSON；授权和绑定不参与参数差异比较。";
     }
 
@@ -364,17 +363,17 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         _start.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy && _settingsValid && _authorization.IsChecked == true;
         _stop.IsEnabled = !_exiting && _running && !_stopping;
         _trayStop.Enabled = _stop.IsEnabled;
-        _save.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy && _settingsValid;
-        _reload.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy;
+        _save.IsEnabled = !_exiting && !_stopping && !_clockBusy && !_configurationBusy && _settingsValid;
+        _reload.IsEnabled = !_exiting && !_stopping && !_clockBusy && !_configurationBusy;
         _authorization.IsEnabled = !_exiting && !_running;
-        _player.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy;
-        _loginStartup.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy;
+        _player.IsEnabled = !_exiting && !_stopping && !_clockBusy;
+        _loginStartup.IsEnabled = !_exiting && !_stopping && !_clockBusy;
         _offset.IsEnabled = !_exiting;
         _clock.IsEnabled = !_exiting && !_clockBusy && !_stopping && !_configurationBusy && _settingsValid;
-        _idleClock.IsEnabled = !_exiting && !_clockBusy && !_configurationBusy;
-        _trackIntro.IsEnabled = _width.IsEnabled = _hold.IsEnabled = _clockStyle.IsEnabled = !_exiting && !_clockBusy && !_configurationBusy;
+        _idleClock.IsEnabled = !_exiting && !_clockBusy;
+        _trackIntro.IsEnabled = _width.IsEnabled = _hold.IsEnabled = _clockStyle.IsEnabled = !_exiting && !_clockBusy;
         _noLyricsTitleHold.IsEnabled = _pollInterval.IsEnabled = _trackSettle.IsEnabled = _requestTimeout.IsEnabled
-            = !_exiting && !_clockBusy && !_configurationBusy;
+            = !_exiting && !_clockBusy;
         _idleClockDelay.IsEnabled = _idleClock.IsEnabled && _idleClock.IsChecked == true;
         _trackIntroHold.IsEnabled = _trackIntro.IsEnabled && _trackIntro.IsChecked == true;
         RefreshSettingsFeedback();
@@ -383,7 +382,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
     private void BeginConfiguration(bool save)
     {
-        if (_exiting || _running || _stopping || _clockBusy || _configurationBusy || (save && !_settingsValid)) return;
+        if (_exiting || _stopping || _clockBusy || _configurationBusy || (save && !_settingsValid)) return;
         if (save && _loginStartup.IsChecked is null)
         {
             _lastConfigurationResult = "自启状态未知，请明确勾选或取消自启后再保存，或重新加载。 ";
@@ -400,7 +399,8 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
     private ProbeSettings CaptureRuntimeSettings() => new()
     {
-        Player = SelectedPlayer,
+        Mode = SelectedPlayer,
+        Player = SelectedPlayer == PlayerMode.NetEaseMusic ? MusicPlayer.NetEaseMusic : MusicPlayer.QQMusic,
         IdleClockEnabled = _idleClock.IsChecked == true,
         IdleClockDelayMs = (int)_idleClockDelay.SelectedItem,
         TrackIntroEnabled = _trackIntro.IsChecked == true,
@@ -423,6 +423,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         _configuration.Text = save ? "正在保存配置，请等待实际 I/O 完成……" : "正在读取配置……";
         try
         {
+            var savedSession = _session;
             var settings = await Task.Run(() =>
             {
                 // 每次保存重新验证磁盘内容，禁止以默认配置覆盖已经损坏的文件。
@@ -434,6 +435,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
                     current.PageHoldMs = hold;
                     current.ClockStyle = clockStyle;
                     current.ApplyRuntimeOverrides(runtimeSettings);
+                    savedSession?.MergeBindings(current);
                     current.Save(_settingsPath);
                 }
                 return current;
@@ -443,7 +445,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
             _savedParameters = DesktopParameters.From(settings);
             if (!save)
             {
-                _player.SelectedValue = settings.Player;
+                _player.SelectedValue = settings.Mode;
                 _offset.Value = settings.OffsetMs;
                 _width.SelectedItem = settings.DisplayWidthUnits;
                 if (!_hold.Items.Contains(settings.PageHoldMs)) _hold.Items.Add(settings.PageHoldMs);
@@ -458,7 +460,25 @@ internal sealed partial class DesktopWindow : Window, IDisposable
                 SelectMilliseconds(_trackSettle, settings.TrackSettleMs);
                 SelectMilliseconds(_requestTimeout, settings.RequestTimeoutMs);
             }
-            _lastConfigurationResult = save ? "JSON 已保存，正在确认自启设置。 " : "配置已加载。 ";
+            _lastConfigurationResult = save ? "已保存，正在应用" : "已保存";
+            RefreshSettingsFeedback();
+            if (save && savedSession?.Latest is { Running: true, Stopping: false })
+            {
+                try
+                {
+                    bool applied = await savedSession.QueueParameters(DesktopParameters.From(settings));
+                    _lastConfigurationResult = applied ? "已保存并生效" : "已保存；运行已停止";
+                }
+                catch (Exception exception)
+                {
+                    _configurationError = $"已保存；运行参数应用失败（{exception.GetType().Name}），请停止后重新开始";
+                    _lastConfigurationResult = "已保存；应用失败";
+                    Program.ReportDesktopLog("配置已保存，但运行参数应用失败；未重启任务。");
+                }
+                if (savedSession.Latest.Display == "设备写入失败；实际显示未知")
+                    _configurationError = "参数已应用；设备写入失败，实际显示未知";
+            }
+            else if (save) _lastConfigurationResult = "已保存";
             _configuration.Text = save ? "JSON 配置已保存；授权未保存。" : "配置已加载；未自动联网或写屏。";
         }
         catch (Exception exception)
@@ -481,10 +501,9 @@ internal sealed partial class DesktopWindow : Window, IDisposable
                     if (applyStartup && actual != loginStartup) throw new IOException("自启状态在确认期间变化。");
                     return actual;
                 });
-                _loginStartup.IsChecked = enabled;
+                if (!save) _loginStartup.IsChecked = enabled;
                 _savedStartup = enabled;
                 _startupStatus.Text = "";
-                if (applyStartup) _lastConfigurationResult = $"全部设置已保存（{DateTime.Now:HH:mm:ss}），自启已回读确认；不含授权。 ";
             }
             catch (Exception exception)
             {
@@ -492,10 +511,10 @@ internal sealed partial class DesktopWindow : Window, IDisposable
                 try
                 {
                     bool enabled = await Task.Run(_startup.ReadEnabled);
-                    _loginStartup.IsChecked = enabled;
+                    if (!save) _loginStartup.IsChecked = enabled;
                     actual = enabled ? "回读实际状态：已启用。" : "回读实际状态：已关闭。";
                 }
-                catch { _loginStartup.IsChecked = null; actual = "实际状态未知，未标示为开启或关闭；请重新加载，或明确选择后保存修复。"; }
+                catch { if (!save) _loginStartup.IsChecked = null; actual = "实际状态未知，未标示为开启或关闭；请重新加载，或明确选择后保存修复。"; }
                 _savedStartup = null;
                 if (_settingsValid) _configurationError = save ? "部分设置保存失败：自启未确认，请查看高级设置" : "自启状态读取失败，请查看高级设置";
                 _startupStatus.Text = $"自启读取或应用失败（{exception.GetType().Name}）。{actual}";
@@ -512,7 +531,9 @@ internal sealed partial class DesktopWindow : Window, IDisposable
     private void Start()
     {
         if (_exiting || _running || _stopping || _clockBusy || _configurationBusy || !_settingsValid || _authorization.IsChecked != true) return;
-        int capturedOffset = (int)_offset.Value;
+        if (_savedParameters is not { } saved) return;
+        var savedSettings = new ProbeSettings();
+        saved.ApplyTo(savedSettings);
         _running = true;
         _session = new DesktopSession();
         _stopTask = null;
@@ -523,7 +544,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         Volatile.Write(ref _acceptLogs, 1);
         _status.Text = "正在启动，等待曲目与设备初始化";
         UpdateControls();
-        _runTask = RunSessionAsync(capturedOffset, _cancellation, (int)_width.SelectedItem, (int)_hold.SelectedItem, CaptureRuntimeSettings());
+        _runTask = RunSessionAsync(saved.OffsetMs, _cancellation, saved.Width, saved.Hold, savedSettings);
     }
 
     private async Task RunSessionAsync(int offset, CancellationTokenSource cancellation, int width, int hold, ProbeSettings runtimeSettings)

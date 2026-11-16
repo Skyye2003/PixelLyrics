@@ -33,6 +33,7 @@ internal static class ProbeSelfTests
                 throw new Exception();
             });
         SessionSelfTests.Register(Check);
+        LiveSettingsSelfTests.Register(Check);
         NetEaseSelfTests.Register(Check);
         Check("休眠恢复：只重新绑定唯一会话，平时不切换会话", () =>
         {

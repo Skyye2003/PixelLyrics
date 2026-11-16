@@ -189,11 +189,12 @@ internal static class NetEaseSelfTests
                 settings.SetVerifiedBinding(song, "QQmid");
                 settings.NetEaseBindings[song.Id] = "123";
                 settings.Player = MusicPlayer.NetEaseMusic;
+                settings.Mode = PlayerMode.NetEaseMusic;
                 settings.Save(path);
                 var restored = ProbeSettings.Load(path);
                 Require(restored.Player == MusicPlayer.NetEaseMusic && restored.Bindings[song.Id].Mid == "QQmid"
                     && restored.NetEaseBindings[song.Id] == "123");
-                Require(DesktopParameters.From(restored).Differences(DesktopParameters.From(restored) with { Player = MusicPlayer.QQMusic }) == "播放器");
+                Require(DesktopParameters.From(restored).Differences(DesktopParameters.From(restored) with { Mode = PlayerMode.QQMusic }) == "播放器");
             }
             finally { File.Delete(path); }
         });

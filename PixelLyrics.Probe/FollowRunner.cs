@@ -63,9 +63,10 @@ internal static class FollowRunner
         var runId = session.Latest.RunId;
         LyricAttempt? pendingAttempt = null;
         string checkState = "等待曲目稳定";
-        Program.ReportDesktopLog($"自动跟随已启用：播放器及歌词来源为{settings.Player.DisplayName()}；切歌取消旧请求。失败不自动重试；不输出歌词正文。配置不会保存联网授权。");
+        Program.ReportDesktopLog($"自动跟随已启用：选择模式为{settings.Mode.DisplayName()}；切换来源取消旧请求。失败不自动重试；不输出歌词正文。配置不会保存联网授权。");
         var started = session.Clock;
-        using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(settings.PollIntervalMs));
+        media.Mode = settings.Mode;
+        session.RememberBindings(settings);
         var gate = new FollowGeneration(settings.TrackSettleMs);
         var fallback = new NoLyricsFallback();
         var idleClock = new IdleClock(settings.IdleClockEnabled, settings.IdleClockDelayMs);
@@ -74,13 +75,14 @@ internal static class FollowRunner
         Task<LoadedLyrics>? pending = null;
         long pendingGeneration = -1;
         string? pendingSourceId = null;
+        MusicPlayer pendingPlayer = MusicPlayer.QQMusic;
         LyricsDocument? lyrics = null;
         MediaSnapshot? previous = null;
         long lastAdvance = 0;
         int advanceCount = 0;
         bool attempted = false;
         int networkBlocked = 0;
-        async Task<LoadedLyrics> LoadGuarded(SongIdentity song, ProbeSongBinding? binding, CancellationToken requestToken, string? sourceSongId)
+        async Task<LoadedLyrics> LoadGuarded(SongIdentity song, ProbeSongBinding? binding, CancellationToken requestToken, string? sourceSongId, MusicPlayer source, int timeout, LyricAttempt attempt, long generation)
         {
             try
             {
@@ -88,14 +90,14 @@ internal static class FollowRunner
                 {
                     requestToken.ThrowIfCancellationRequested();
                     if (Volatile.Read(ref networkBlocked) != 0) throw new OperationCanceledException();
-                }, requestTimeoutMs: settings.RequestTimeoutMs, player: settings.Player, sourceSongId: sourceSongId,
+                }, requestTimeoutMs: timeout, player: source, sourceSongId: sourceSongId,
                     beforeRequest: async () =>
                     {
                         var current = await media.ReadAsync(requestToken);
                         if (current is not { Stable: true } || !media.IsCurrent(current)
-                            || current.Song.Id != song.Id || current.SourceSongId != sourceSongId
-                            || current.GetPosition() is null || !session.CanApply(pendingAttempt)
-                            || !gate.CanApply(pendingGeneration, current.Song.Id, current.Revision))
+                            || current.Player != source || current.Song.Id != song.Id || current.SourceSongId != sourceSongId
+                            || current.GetPosition() is null || !session.CanApply(attempt)
+                            || !gate.CanApply(generation, current.Song.Id, current.Revision))
                             throw new OperationCanceledException();
                     });
             }
@@ -126,7 +128,34 @@ internal static class FollowRunner
             {
                 token.ThrowIfCancellationRequested();
                 if (options.DurationSeconds is int duration && started.Elapsed >= TimeSpan.FromSeconds(duration)) break;
+                bool updateClock = false;
+                bool applied = session.ApplyParameters(parameters =>
+                {
+                    var old = DesktopParameters.From(settings);
+                    parameters.ApplyTo(settings);
+                    media.Mode = settings.Mode;
+                    gate.Configure(settings.TrackSettleMs);
+                    intro.Configure(settings.TrackIntroEnabled, settings.TrackIntroHoldMs, started.Elapsed);
+                    if (old.IdleClock != parameters.IdleClock || old.IdleDelay != parameters.IdleDelay)
+                        idleClock.Configure(settings.IdleClockEnabled, settings.IdleClockDelayMs);
+                    if (screen is not null)
+                    {
+                        screen.DisplayWidthUnits = settings.DisplayWidthUnits;
+                        screen.PageHoldMs = settings.PageHoldMs;
+                        updateClock = options.Send && screen.ClockRequested && !screen.HasFailed && old.ClockStyle != parameters.ClockStyle;
+                    }
+                });
+                if (updateClock && !session.Latest.Stopping)
+                {
+                    token.ThrowIfCancellationRequested();
+                    screen!.ShowClock(settings.ClockStyle);
+                    if (screen.HasFailed) session.Update(s => s with { Display = "设备写入失败；实际显示未知" });
+                }
+                if (applied) Program.ReportDesktopLog($"配置版本 {session.Latest.ParameterVersion} 已应用" + (screen?.HasFailed == true ? "；设备写入失败，实际显示未知。" : "。"));
+                token.ThrowIfCancellationRequested();
                 var snapshot = await media.ReadAsync(token);
+                if (session.Latest.Source != snapshot?.Player)
+                    Program.ReportDesktopLog($"来源变化：{session.Latest.Source?.DisplayName() ?? "未绑定"} → {snapshot?.Player.DisplayName() ?? "不可用"}；旧歌词及位置绑定失效。");
                 bool usable = snapshot is not null && snapshot.Stable && media.IsCurrent(snapshot);
                 string? identity = usable ? snapshot!.Song.Id : null;
                 long revision = usable ? snapshot!.Revision : -1;
@@ -155,7 +184,7 @@ internal static class FollowRunner
                     Program.ReportDesktopLog(identity is null ? "会话暂不可用：旧词已失效。" : "检测到曲目或媒体版本变化，等待稳定后核对歌词。");
                 }
                 if (screen?.HasFailed == true) break;
-                session.Update(s => s with { Settled = usable && gate.IsSettled(started.Elapsed),
+                session.Update(s => s with { Source = snapshot?.Player, SourceNotice = media.Notice, Settled = usable && gate.IsSettled(started.Elapsed),
                     Playback = usable ? snapshot!.Status.ToString() : "会话不可用",
                     Check = s.NetworkBlocked ? s.Check : !usable ? media.UnavailableReason
                         : snapshot!.GetPosition() is null ? "播放进度不可用或已过期；请恢复播放并确认进度组件正常"
@@ -175,13 +204,14 @@ internal static class FollowRunner
                     if (pendingAttempt is null) continue;
                     attempted = true;
                     ProbeSongBinding? binding;
-                    if (settings.Player == MusicPlayer.NetEaseMusic)
+                    if (snapshot!.Player == MusicPlayer.NetEaseMusic)
                         binding = settings.NetEaseBindings.TryGetValue(snapshot!.Song.Id, out var id) ? new(id) : null;
                     else settings.Bindings.TryGetValue(snapshot!.Song.Id, out binding);
                     requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
                     pendingGeneration = gate.Generation;
                     pendingSourceId = snapshot.SourceSongId;
-                    pending = LoadGuarded(snapshot.Song, binding, requestCancellation.Token, snapshot.SourceSongId);
+                    pendingPlayer = snapshot.Player;
+                    pending = LoadGuarded(snapshot.Song, binding, requestCancellation.Token, snapshot.SourceSongId, pendingPlayer, settings.RequestTimeoutMs, pendingAttempt, pendingGeneration);
                     Program.ReportDesktopLog("开始核对当前曲目；取词与可选歌名与歌手开场独立进行。");
                 }
                 if (pending is { IsCompleted: true })
@@ -194,13 +224,14 @@ internal static class FollowRunner
                         // Re-read after completion to close the request/track-change race.
                         var check = await media.ReadAsync(token);
                         if (usable && session.CanApply(pendingAttempt) && gate.CanApply(pendingGeneration, check?.Song.Id, check?.Revision ?? -1)
-                            && check is { Stable: true } && check.SourceSongId == pendingSourceId && media.IsCurrent(check))
+                            && check is { Stable: true } && check.Player == pendingPlayer && check.SourceSongId == pendingSourceId && media.IsCurrent(check))
                         {
                             token.ThrowIfCancellationRequested();
                             checkState = "已核对并在内存绑定歌词";
                             lyrics = loaded.Document;
-                            if (settings.Player == MusicPlayer.NetEaseMusic) settings.NetEaseBindings[check.Song.Id] = loaded.Mid;
+                            if (pendingPlayer == MusicPlayer.NetEaseMusic) settings.NetEaseBindings[check.Song.Id] = loaded.Mid;
                             else settings.SetVerifiedBinding(check.Song, loaded.Mid, loaded.Alias);
+                            session.RememberBindings(settings);
                             if (options.SaveSettings) settings.Save(options.SettingsPath!);
                             snapshot = check;
                             Program.ReportDesktopLog($"当前曲目已绑定 {lyrics.Lines.Count} 行；歌词仅保存在内存。");
@@ -296,7 +327,7 @@ internal static class FollowRunner
                     else if (lyrics is null || position is null || (!playing && !paused)) screen!.ClearLyrics();
                     else if ((playing || paused) && media.IsCurrent(snapshot!))
                     {
-                        var query = position.Value - TimeSpan.FromMilliseconds(options.OffsetMs);
+                        var query = position.Value - TimeSpan.FromMilliseconds(settings.OffsetMs);
                         var line = query < TimeSpan.Zero ? null : lyrics.GetLineAt(query);
                         if (!paused || !string.IsNullOrWhiteSpace(line?.Text))
                             screen!.ShowLyric(line?.Text, line is null ? TimeSpan.Zero : query - line.Timestamp,
@@ -328,7 +359,7 @@ internal static class FollowRunner
                     : screen.HasDisplayableLyrics ? "歌词输出阶段；实际显示待确认"
                     : "无可显示歌词；实际显示待确认" });
             }
-            while (await timer.WaitForNextTickAsync(token));
+            while (await WaitForNextAsync(settings.PollIntervalMs, token));
         }
         finally
         {
@@ -340,6 +371,12 @@ internal static class FollowRunner
             if (options.Send) screen!.ClearLyrics();
         }
         return screen?.HasFailed == true ? 5 : 0;
+    }
+
+    private static async Task<bool> WaitForNextAsync(int milliseconds, CancellationToken token)
+    {
+        await Task.Delay(milliseconds, token);
+        return true;
     }
 
     internal static bool CandidateMatches(Song candidate, SongIdentity song)
@@ -390,9 +427,17 @@ internal sealed class TrackIntro(bool enabled, int holdMs)
     private TimeSpan startedAt;
     public string? Title { get; private set; }
 
+    private bool ended;
+    public void Configure(bool nextEnabled, int nextHold, TimeSpan now)
+    {
+        if (Title is null || Elapsed(now) >= TimeSpan.FromMilliseconds(holdMs)) ended = true;
+        if (!nextEnabled) ended = true;
+        enabled = nextEnabled; holdMs = nextHold;
+    }
     public void Start(long currentGeneration, string? title, TimeSpan now, string? artist = null)
     {
         generation = currentGeneration;
+        ended = false;
         Title = !enabled || title is null ? null
             : string.IsNullOrWhiteSpace(artist) ? title : $"{title} - {artist}";
         startedAt = now;
@@ -400,8 +445,11 @@ internal sealed class TrackIntro(bool enabled, int holdMs)
 
     public TimeSpan Elapsed(TimeSpan now) => now < startedAt ? TimeSpan.Zero : now - startedAt;
     public bool ReplacesFallbackTitle(long currentGeneration) => generation == currentGeneration && Title is not null;
-    public bool IsShowing(long currentGeneration, TimeSpan now) => ReplacesFallbackTitle(currentGeneration)
-        && Elapsed(now) < TimeSpan.FromMilliseconds(holdMs);
+    public bool IsShowing(long currentGeneration, TimeSpan now)
+    {
+        if (Elapsed(now) >= TimeSpan.FromMilliseconds(holdMs)) ended = true;
+        return enabled && !ended && ReplacesFallbackTitle(currentGeneration);
+    }
 }
 
 // 纯状态计时器；返回 true 即消耗本次发送机会，失败也不重试。无后台计时任务。
@@ -412,6 +460,10 @@ internal sealed class IdleClock(bool enabled, int delayMs)
     private bool clockSent;
     private bool stopped;
 
+    public void Configure(bool nextEnabled, int nextDelay)
+    {
+        enabled = nextEnabled; delayMs = nextDelay; blankSince = null;
+    }
     public bool Observe(long currentGeneration, TimeSpan now, bool blank, bool paused = false,
         bool waiting = false, bool exiting = false, bool otherClockSent = false)
     {
@@ -483,6 +535,7 @@ internal sealed class FollowGeneration(int settleMs = 600)
         return true;
     }
 
+    internal void Configure(int milliseconds) => settleMs = milliseconds;
     public bool IsSettled(TimeSpan now) => identity is not null && now - changedAt >= TimeSpan.FromMilliseconds(settleMs);
     public bool CanApply(long generation, string? songId, long mediaRevision) => identity is not null
         && Generation == generation && identity == songId && revision == mediaRevision;
