@@ -13,6 +13,45 @@ public static class SongMatcher
     public const double MinimumLead = 5;
     public const double ReleaseTagMaximumDurationDeltaSeconds = 5;
 
+    // Manual confirmation supplements metadata; it never overrides a conflict or missing recording identity.
+    public static SongScore EvaluateManual(SongDetails details, string title, string artist, string? album, double seconds)
+    {
+        var score = Evaluate(details, title, artist, album, seconds, allowArtistSubset: true);
+        if (score.Category != MatchCategory.Accepted) return score;
+        bool live = Title(title).Versions.Split('/').Contains("LIVE")
+            || Regex.IsMatch(album ?? "", Versions[0].Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        if (!live) return score;
+        string identity = Key(album ?? "");
+        bool specific = Regex.IsMatch(album ?? "", @"演唱会|演唱會|巡回|巡迴|音乐会|音樂會|CONCERT|TOUR",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        string recording = Regex.Replace(album ?? "", @"演唱会|演唱會|巡回|巡迴|音乐会|音樂會|CONCERT|TOUR|LIVE|现场|現場", "",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        specific &= Key(recording).Length >= 4;
+        if (!specific || identity != Key(details.Album))
+            return new(details, 0, MatchCategory.VersionConflict, "缺少一致的具体演出或录音版本信息");
+        if (Math.Abs(seconds - details.Interval) > ReleaseTagMaximumDurationDeltaSeconds)
+            return new(details, 0, MatchCategory.DurationConflict, "同一录音版本要求时长差不超过 5 秒");
+        return score;
+    }
+
+    public static SongScore EvaluateTrial(SongDetails details, string title, string artist, string? album, double seconds)
+    {
+        var expected = Title(title); var actual = Title(details.Title);
+        SongScore Reject(MatchCategory category, string reason) => new(details, 0, category, reason);
+        if (string.IsNullOrWhiteSpace(title) || string.IsNullOrWhiteSpace(details.Title)) return Reject(MatchCategory.InvalidMetadata, "缺少歌名，不能试用");
+        bool Live(string name, string? record) => Regex.IsMatch(name + " " + record, Versions[0].Pattern, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+        bool expectedLive = Live(title, album), actualLive = Live(details.Title, details.Album);
+        if (expectedLive != actualLive) return Reject(MatchCategory.VersionConflict, "录音室和现场版本不能混用");
+        // Non-live manual trials leave title, credit and arrangement differences to listening confirmation.
+        if (expectedLive && (expected.Body != actual.Body || expected.Versions != actual.Versions))
+            return Reject(MatchCategory.VersionConflict, "现场录音版本冲突");
+        if (!double.IsFinite(seconds) || !double.IsFinite(details.Interval) || seconds <= 0 || details.Interval <= 0 || Math.Abs(seconds - details.Interval) > 5)
+            return Reject(MatchCategory.DurationConflict, "时长差超过 5 秒，不能试用");
+        if (expectedLive && !string.IsNullOrWhiteSpace(album) && !string.IsNullOrWhiteSpace(details.Album) && Key(album) != Key(details.Album))
+            return Reject(MatchCategory.VersionConflict, "演出或录音专辑不同，不能试用");
+        return new(details, 100, MatchCategory.Accepted, "试用后确认时间轴");
+    }
+
     private static string Fold(string value) => value.Normalize(NormalizationForm.FormKC).ToUpperInvariant();
     private static string Key(string value) => string.Concat(Fold(value).EnumerateRunes()
         .Where(Rune.IsLetterOrDigit).Select(r => r.ToString()));
@@ -90,11 +129,11 @@ public static class SongMatcher
         }).Where(p => p.Count > 0).ToList();
     }
 
-    private static bool SameArtists(string expected, IReadOnlyList<string> actual)
+    private static bool SameArtists(string expected, IReadOnlyList<string> actual, bool allowSubset = false)
     {
         var left = Artists(expected);
         var right = actual.SelectMany(Artists).ToList();
-        if (left.Count == 0 || left.Count != right.Count) return false;
+        if (left.Count == 0 || right.Count > 20 || (allowSubset ? left.Count >= right.Count : left.Count != right.Count)) return false;
         // 一对一匹配，避免共享别名或重复歌手被重复使用。
         bool Pair(int index, HashSet<int> used)
         {
@@ -115,7 +154,7 @@ public static class SongMatcher
         string.IsNullOrWhiteSpace(candidate.Name) || Title(candidate.Name).Body == Title(title).Body;
 
     public static SongScore Evaluate(SongDetails details, string title, string artist, string? album,
-        double seconds, string? artistAlias = null)
+        double seconds, string? artistAlias = null, bool allowArtistSubset = false)
     {
         bool releaseDifference = false;
         SongScore Reject(MatchCategory category, string reason) => new(details, 0, category,
@@ -132,10 +171,17 @@ public static class SongMatcher
             return Reject(MatchCategory.TitleConflict, "歌名主体冲突");
         if (expected.Versions != actual.Versions)
             return Reject(MatchCategory.VersionConflict, "重要版本冲突（含一方缺省）");
-        if (!SameArtists(artistAlias ?? artist, details.Singers))
-            return Reject(MatchCategory.ArtistConflict, "歌手身份冲突");
         double delta = Math.Abs(seconds - details.Interval);
         bool sameAlbum = !string.IsNullOrWhiteSpace(album) && Key(album).Length > 0 && Key(album) == Key(details.Album);
+        bool partialArtists = !SameArtists(artistAlias ?? artist, details.Singers);
+        if (partialArtists)
+        {
+            if (!allowArtistSubset || !SameArtists(artistAlias ?? artist, details.Singers, allowSubset: true))
+                return Reject(MatchCategory.ArtistConflict, "歌手身份冲突");
+            // A shorter playback artist list requires stronger recording metadata.
+            if (!sameAlbum || delta > ReleaseTagMaximumDurationDeltaSeconds || Key(title) != Key(details.Title))
+                return Reject(MatchCategory.InvalidMetadata, "当前播放器的歌手名单可能不完整，缺少一致的完整版本、专辑或时长证据");
+        }
         if (releaseDifference && !sameAlbum)
             return Reject(MatchCategory.TitleConflict, "发行标签差异拒绝：双方专辑必须非空且一致（当前专辑不同或未知）");
         if (releaseDifference && delta > ReleaseTagMaximumDurationDeltaSeconds)
@@ -146,7 +192,7 @@ public static class SongMatcher
         double albumScore = sameAlbum ? 5 : 0;
         double score = 75 + durationScore + albumScore;
         return new(details, score, score >= MinimumScore ? MatchCategory.Accepted : MatchCategory.BelowThreshold,
-            $"综合评分 {score:F2}/100；歌名主体及版本一致；歌手身份一致；专辑{(albumScore > 0 ? "一致" : "不同或未知（软评分）")}；时长差 {delta:F3}s"
+            $"综合评分 {score:F2}/100；歌名主体及版本一致；{(partialArtists ? "播放歌手名单为候选子集，完整版本、专辑及时长已核验" : "歌手身份一致")}；专辑{(albumScore > 0 ? "一致" : "不同或未知（软评分）")}；时长差 {delta:F3}s"
             + (releaseDifference ? $"；发行标签差异接受：歌名主体、重要版本及歌手一致，双方专辑非空且一致，时长差 ≤ {ReleaseTagMaximumDurationDeltaSeconds}s" : "")
             + (artistAlias is null ? "" : "；采用显式歌手别名"));
     }

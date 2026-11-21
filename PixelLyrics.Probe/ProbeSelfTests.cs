@@ -12,6 +12,9 @@ internal static class ProbeSelfTests
             try { action(); passed++; Console.WriteLine("通过：" + name); }
             catch { failed++; Console.Error.WriteLine("失败：" + name); }
         }
+        RecoverySelfTests.Register(Check);
+        SourceMappingSelfTests.Register(Check);
+        LifecycleSelfTests.Register(Check);
         void Accept(params string[] args) => Check(string.Join(' ', args), () => { ProbeOptions.Parse(args); });
         void Reject(params string[] args) => Check("拒绝 " + string.Join(' ', args), () =>
         {
@@ -145,6 +148,13 @@ internal static class ProbeSelfTests
                 || !FollowRunner.CandidateMatches(new("c", "认真的雪 (Live)", "薛之谦"), song)) throw new Exception();
             if (FollowRunner.SafeFailureReason(new("敏感歌词或服务端正文")) != "接口响应未通过协议校验") throw new Exception();
         });
+        Check("协议锁止保留安全原因且不泄漏响应正文", () =>
+        {
+            foreach (var message in new[] { "不是明文 LRC 或普通 Base64。", "Base64 内容不是严格 UTF-8。", "缺少对象：req_1", "HTTP 429；不跟随重定向。", "非有效普通 LRC（解析错误 2）。" })
+                if (FollowRunner.SafeFailureReason(new(message)) == "接口响应未通过协议校验") throw new Exception(message);
+            foreach (var message in new[] { "缺少对象：敏感正文", "HTTP 敏感正文；不跟随重定向。", "非有效普通 LRC（解析错误 敏感正文）。" })
+                if (FollowRunner.SafeFailureReason(new(message)) != "接口响应未通过协议校验") throw new Exception();
+        });
         Check("跟随缺字段候选跳过并接受用户实例", () =>
         {
             var song = new PixelLyrics.Core.SongIdentity("Free Free Free", "東京スカパラダイスオーケストラ (东京斯卡乐团)/幾田りら (ikura)", "Album", TimeSpan.FromSeconds(254.233));
@@ -185,14 +195,14 @@ internal static class ProbeSelfTests
             using var client = new PixelLyrics.OnlineProbe.OnlineLyricsClient(handler);
             bool networkError = false;
             try { FollowRunner.LoadAsync(song, null, CancellationToken.None, testClient: client).GetAwaiter().GetResult(); }
-            catch (System.Net.Http.HttpRequestException) { networkError = true; }
-            if (!networkError || handler.Count != 1 || intro.IsShowing(1, TimeSpan.FromSeconds(3))) throw new Exception();
+            catch (PixelLyrics.OnlineProbe.LyricsRequestException ex) when (ex.Kind == PixelLyrics.OnlineProbe.RequestFailureKind.Transient) { networkError = true; }
+            if (!networkError || handler.Count != 3 || intro.IsShowing(1, TimeSpan.FromSeconds(3))) throw new Exception();
             using var canceled = new CancellationTokenSource();
             canceled.Cancel();
             try { FollowRunner.LoadAsync(song, null, canceled.Token, testClient: client).GetAwaiter().GetResult(); }
             catch (OperationCanceledException)
             {
-                if (handler.Count == 1) return;
+                if (handler.Count == 3) return;
             }
             throw new Exception();
         });

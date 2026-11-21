@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Text.Json;
 using PixelLyrics.Core;
 
@@ -26,18 +26,22 @@ public sealed class NetEaseLrcException : ProbeException
     }
 }
 
-// Site endpoints: anonymous requests only, no cookies, redirects, proxy or retries.
+// Site endpoints: anonymous requests only, no cookies, redirects, proxy; requests use bounded recovery.
 public sealed class NetEaseLyricsClient : ILyricsSource
 {
     private readonly HttpClient client;
-    private bool stopped;
+    private readonly int timeoutMs;
+    public RequestRecovery Recovery { get; set; } = new();
+    public Func<CancellationToken, Task>? BeforeRequest { get; set; }
+    public Action<RequestNotice>? Report { get; set; }
     public NetEaseLyricsClient(int timeoutMs = 10000) : this(new SocketsHttpHandler
     { AllowAutoRedirect = false, UseCookies = false, UseProxy = false, Credentials = null,
         ConnectTimeout = TimeSpan.FromMilliseconds(timeoutMs) }, timeoutMs) { }
     internal NetEaseLyricsClient(HttpMessageHandler handler, int timeoutMs = 10000)
     {
         if (timeoutMs is < 2000 or > 30000) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
-        client = new(handler) { Timeout = TimeSpan.FromMilliseconds(timeoutMs), MaxResponseContentBufferSize = 2 * 1024 * 1024 };
+        this.timeoutMs = timeoutMs;
+        client = new(handler) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = 2 * 1024 * 1024 };
         client.DefaultRequestHeaders.Referrer = new Uri("https://music.163.com/");
         client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
     }
@@ -49,27 +53,25 @@ public sealed class NetEaseLyricsClient : ILyricsSource
     private async Task<T> Request<T>(string path, CancellationToken token, Func<JsonElement, T> parse,
         Dictionary<string, string>? form = null)
     {
-        if (stopped) throw new ProbeException("在线客户端已停止，禁止后续请求。");
-        try
+        var stage = form is not null ? RequestStage.Search : path.Contains("/lyric") ? RequestStage.Lyrics : RequestStage.Details;
+        return await Recovery.ExecuteAsync(client, () =>
         {
-            using var request = new HttpRequestMessage(form is null ? HttpMethod.Get : HttpMethod.Post, "https://music.163.com" + path);
+            var request = new HttpRequestMessage(form is null ? HttpMethod.Get : HttpMethod.Post, "https://music.163.com" + path);
             if (form is not null) request.Content = new FormUrlEncodedContent(form);
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, token);
-            Protocol.CheckHttp(response.StatusCode);
-            using var doc = JsonDocument.Parse(Protocol.Utf8(await response.Content.ReadAsByteArrayAsync(token)));
+            return request;
+        }, json =>
+        {
+            using var doc = JsonDocument.Parse(json);
             var root = doc.RootElement;
             if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("code", out var code)
-                || !code.TryGetInt32(out int value) || value != 200)
+                || !code.TryGetInt32(out int value))
                 throw new ProbeException("网易云接口业务码异常。");
+            if (value != 200 && value != 301) throw new ProbeException("网易云接口业务码异常。");
+            if (value == 301) throw new LyricsRequestException(RequestFailureKind.AccessDenied, stage, "网易云接口要求登录");
             return parse(root);
-        }
-        catch (NoLyricsException) { throw; }
-        catch (UntimedLyricsException) { throw; }
-        catch (CandidateMetadataException) { throw; }
-        catch (Exception ex) when (ex is JsonException or InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
-        { stopped = true; throw new ProbeException("网易云响应格式错误。"); }
-        catch { stopped = true; throw; }
+        }, stage, timeoutMs, token, BeforeRequest, Report);
     }
+
     public Task<SongDetails> GetDetailsAsync(string id, CancellationToken cancellationToken = default)
     {
         ValidateId(id);
@@ -117,6 +119,19 @@ public sealed class NetEaseLyricsClient : ILyricsSource
             throw new NetEaseLrcException(parsed.Errors.FirstOrDefault());
         return new(text, parsed.Document, new Dictionary<string, string>());
     }
+    public Task<string[]> SearchIdsAsync(string query, CancellationToken token = default) => Request("/api/search/get", token, root =>
+    {
+        var result = Protocol.Object(root, "result");
+        if (!result.TryGetProperty("songs", out var songs))
+        {
+            if (result.TryGetProperty("songCount", out var count) && count.TryGetInt32(out int n) && n == 0) return [];
+            throw new ProbeException("网易云搜索列表缺失。");
+        }
+        if (songs.ValueKind != JsonValueKind.Array) throw new ProbeException("网易云搜索格式错误。");
+        return songs.EnumerateArray().Take(OnlineLyricsClient.MaximumCandidates)
+            .Select(s => s.GetProperty("id").GetInt64().ToString(CultureInfo.InvariantCulture)).ToArray();
+    }, new() { ["s"] = query, ["type"] = "1", ["limit"] = "20", ["offset"] = "0" });
+
     public async Task<SongSelection> RecallAsync(string title, string artist, string? album, double seconds,
         CancellationToken token = default, Action? ensureNetworkAllowed = null, string? requiredMid = null,
         string? artistAlias = null, Func<Task>? beforeRequest = null)

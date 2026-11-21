@@ -1,5 +1,4 @@
-using System.Net;
-using System.Net.Http.Json;
+﻿using System.Net.Http.Json;
 using System.Text.Json;
 
 namespace PixelLyrics.OnlineProbe;
@@ -16,7 +15,10 @@ public sealed record SongDetails(string Mid, string Title, IReadOnlyList<string>
 public sealed class OnlineLyricsClient : ILyricsSource
 {
     private readonly HttpClient client;
-    private bool stopped;
+    private readonly int timeoutMs;
+    public RequestRecovery Recovery { get; set; } = new();
+    public Func<CancellationToken, Task>? BeforeRequest { get; set; }
+    public Action<RequestNotice>? Report { get; set; }
 
     public OnlineLyricsClient(int timeoutMs = 10000) : this(new SocketsHttpHandler
     {
@@ -27,7 +29,8 @@ public sealed class OnlineLyricsClient : ILyricsSource
     internal OnlineLyricsClient(HttpMessageHandler handler, int timeoutMs = 10000)
     {
         if (timeoutMs is < 2000 or > 30000) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
-        client = new HttpClient(handler) { Timeout = TimeSpan.FromMilliseconds(timeoutMs), MaxResponseContentBufferSize = 2 * 1024 * 1024 };
+        this.timeoutMs = timeoutMs;
+        client = new HttpClient(handler) { Timeout = Timeout.InfiniteTimeSpan, MaxResponseContentBufferSize = 2 * 1024 * 1024 };
         client.DefaultRequestHeaders.Referrer = new Uri("https://y.qq.com/");
         client.DefaultRequestHeaders.UserAgent.ParseAdd("Mozilla/5.0");
     }
@@ -35,10 +38,9 @@ public sealed class OnlineLyricsClient : ILyricsSource
     public async Task<IReadOnlyList<Song>> SearchAsync(string title, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(title)) throw new ArgumentException("歌名不可为空。", nameof(title));
-        using var request = new HttpRequestMessage(HttpMethod.Get,
-            "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg?key=" + Uri.EscapeDataString(title) + "&format=json");
-        var candidates = ParseCandidates(await SendAsync(request, cancellationToken));
-        return candidates;
+        return await Recovery.ExecuteAsync(client, () => new HttpRequestMessage(HttpMethod.Get,
+            "https://c.y.qq.com/splcloud/fcgi-bin/smartbox_new.fcg?key=" + Uri.EscapeDataString(title) + "&format=json"),
+            Protocol.Candidates, RequestStage.Search, timeoutMs, cancellationToken, BeforeRequest, Report);
     }
 
     public const int MaximumSearchRequests = 3;
@@ -91,11 +93,8 @@ public sealed class OnlineLyricsClient : ILyricsSource
     public async Task<SongDetails> GetDetailsAsync(string mid, CancellationToken cancellationToken = default)
     {
         ValidateMid(mid);
-        using var request = Request("music.pf_song_detail_svr", "get_song_detail_yqq", new { song_mid = mid, song_type = 0 });
-        string json = await SendAsync(request, cancellationToken);
-        try { return ParseDetails(json, mid); }
-        catch (CandidateMetadataException) { throw; }
-        catch { stopped = true; throw; }
+        return await Recovery.ExecuteAsync(client, () => Request("music.pf_song_detail_svr", "get_song_detail_yqq", new { song_mid = mid, song_type = 0 }),
+            json => ParseDetails(json, mid), RequestStage.Details, timeoutMs, cancellationToken, BeforeRequest, Report);
     }
 
     // Explicit opt-in diagnostics: metadata only; never fetch lyrics or return account/file credentials.
@@ -126,18 +125,9 @@ public sealed class OnlineLyricsClient : ILyricsSource
     public async Task<VerifiedLyrics> FetchAsync(string mid, CancellationToken cancellationToken = default)
     {
         ValidateMid(mid);
-        using var request = Request("music.musichallSong.PlayLyricInfo", "GetPlayLyricInfo",
-            new { songMID = mid, songID = 0, qrc = 0, trans = 0, roma = 0 });
-        string json = await SendAsync(request, cancellationToken);
-        try { return Protocol.Lyrics(json); }
-        catch (NoLyricsException) { throw; }
-        catch { stopped = true; throw; }
-    }
-
-    private IReadOnlyList<Song> ParseCandidates(string json)
-    {
-        try { return Protocol.Candidates(json); }
-        catch { stopped = true; throw; }
+        return await Recovery.ExecuteAsync(client, () => Request("music.musichallSong.PlayLyricInfo", "GetPlayLyricInfo",
+            new { songMID = mid, songID = 0, qrc = 0, trans = 0, roma = 0 }),
+            Protocol.Lyrics, RequestStage.Lyrics, timeoutMs, cancellationToken, BeforeRequest, Report);
     }
 
     private static void ValidateMid(string mid)
@@ -157,15 +147,11 @@ public sealed class OnlineLyricsClient : ILyricsSource
 
     private async Task<string> SendAsync(HttpRequestMessage request, CancellationToken token)
     {
-        if (stopped) throw new ProbeException("在线客户端已停止，禁止后续请求。 ");
-        try
-        {
-            using var response = await client.SendAsync(request, HttpCompletionOption.ResponseContentRead, token);
-            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden) stopped = true;
-            Protocol.CheckHttp(response.StatusCode);
-            return Protocol.Utf8(await response.Content.ReadAsByteArrayAsync(token));
-        }
-        catch { stopped = true; throw; }
+        return await Recovery.ExecuteAsync(client, () => {
+            var copy = new HttpRequestMessage(request.Method, request.RequestUri);
+            if (request.Content is not null) copy.Content = new StringContent(request.Content.ReadAsStringAsync(token).GetAwaiter().GetResult(), System.Text.Encoding.UTF8, "application/json");
+            return copy;
+        }, json => json, RequestStage.Details, timeoutMs, token, BeforeRequest, Report);
     }
 
     internal static SongDetails ParseDetails(string json, string expectedMid)
@@ -180,7 +166,7 @@ public sealed class OnlineLyricsClient : ILyricsSource
         string Required(JsonElement element, string key) => Protocol.String(element, key) is string value && !string.IsNullOrWhiteSpace(value)
             ? value : throw new ProbeException("详情缺少字段：" + key);
         string mid = Required(track, "mid");
-        if (mid != expectedMid) throw new ProbeException("详情 MID 与请求不一致。");
+        if (mid != expectedMid) throw new LyricsRequestException(RequestFailureKind.Identity, RequestStage.Details, "歌曲详情 ID 与请求不一致");
         string title = Required(track, "title");
         string album = Required(Protocol.Object(track, "album"), "title");
         if (!track.TryGetProperty("interval", out var interval) || interval.ValueKind != JsonValueKind.Number || !interval.TryGetDouble(out double seconds)
@@ -189,7 +175,7 @@ public sealed class OnlineLyricsClient : ILyricsSource
             throw new ProbeException("详情歌手缺失。");
         return new(mid, title, singers.EnumerateArray().Select(s => Required(s, "name")).ToArray(), album, seconds);
         }
-        catch (Exception ex) when (ex is ProbeException or InvalidOperationException)
+        catch (Exception ex) when (ex is ProbeException and not LyricsRequestException or InvalidOperationException)
         {
             throw new CandidateMetadataException("单候选详情元数据无效。");
         }

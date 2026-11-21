@@ -1,3 +1,5 @@
+using PixelLyrics.Core;
+using PixelLyrics.OnlineProbe;
 namespace PixelLyrics.Probe;
 
 // 参数按值比较；绑定、自启和授权不属于运行显示参数。
@@ -42,13 +44,42 @@ internal sealed record DesktopSnapshot(Guid RunId, bool Running = true, bool Sto
     string Check = "初始化", string Display = "尚未输出；实际设备显示未确认", bool Busy = false,
     bool Settled = false, bool NetworkBlocked = false, TimeSpan CooldownUntil = default,
     long AttemptId = 0, DesktopParameters? Active = null, MusicPlayer? Source = null,
-    long ParameterVersion = 0, string SourceNotice = "");
+    long ParameterVersion = 0, string SourceNotice = "", bool RecoveryWaiting = false, bool RecoveryManual = false, bool DeviceReady = true,
+    SongIdentity? Song = null, bool NeedsSource = false, LyricSourceMapping? Mapping = null, bool Trial = false);
 
 // 每次运行独享；只有一个最新快照和一个待处理命令，不向 Dispatcher 堆积事件。
 internal sealed class DesktopSession
 {
+    internal RunLifecycle Lifecycle { get; } = new();
     internal System.Diagnostics.Stopwatch Clock { get; } = System.Diagnostics.Stopwatch.StartNew();
     private readonly object sync = new();
+    internal readonly Dictionary<MusicPlayer, RequestRecovery> Recoveries = new() { [MusicPlayer.QQMusic] = new(true), [MusicPlayer.NetEaseMusic] = new(true) };
+    private SourceChoice? sourceChoice;
+    internal volatile bool SourceReminderSuppressed;
+    private TaskCompletionSource<bool>? sourceCompletion;
+    private readonly Dictionary<string, LyricSourceMapping> mappings = new();
+    private readonly HashSet<string> forgotten = new();
+    internal Task<bool> QueueSource(SourceChoice choice)
+    {
+        lock (sync)
+        {
+            if (!state.Running || state.Stopping || state.NetworkBlocked || sourceCompletion is not null) return Task.FromResult(false);
+            if (choice.Trial && (state.Track != choice.Track || !state.DeviceReady || Lifecycle.IsPaused)) return Task.FromResult(false);
+            sourceChoice = choice;
+            sourceCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            return sourceCompletion.Task;
+        }
+    }
+    internal SourceChoice? TakeSource() { lock (sync) { var value = sourceChoice; sourceChoice = null; return value; } }
+    internal void FinishSource(bool success) { lock (sync) { sourceCompletion?.TrySetResult(success); sourceCompletion = null; } }
+    internal void RememberSource(string key, LyricSourceMapping? mapping)
+    {
+        lock (sync)
+        {
+            if (mapping is null) { mappings.Remove(key); forgotten.Add(key); }
+            else { mappings[key] = mapping; forgotten.Remove(key); }
+        }
+    }
     private DesktopSnapshot state;
     private TrackVersion? command;
     private long attempt;
@@ -62,6 +93,7 @@ internal sealed class DesktopSession
         {
             foreach (var pair in settings.Bindings) qqBindings[pair.Key] = pair.Value;
             foreach (var pair in settings.NetEaseBindings) netEaseBindings[pair.Key] = pair.Value;
+            foreach (var pair in settings.SourceMappings) if (!forgotten.Contains(pair.Key)) mappings[pair.Key] = pair.Value;
         }
     }
     internal void MergeBindings(ProbeSettings settings)
@@ -70,6 +102,8 @@ internal sealed class DesktopSession
         {
             foreach (var pair in qqBindings) settings.Bindings[pair.Key] = pair.Value;
             foreach (var pair in netEaseBindings) settings.NetEaseBindings[pair.Key] = pair.Value;
+            foreach (var key in forgotten) settings.SourceMappings.Remove(key);
+            foreach (var pair in mappings) settings.SourceMappings[pair.Key] = pair.Value;
         }
     }
     internal Task<bool> QueueParameters(DesktopParameters parameters)
@@ -102,6 +136,7 @@ internal sealed class DesktopSession
     }
     private void CancelParameters()
     {
+        sourceChoice = null; sourceCompletion?.TrySetResult(false); sourceCompletion = null;
         configuration?.Completion.TrySetResult(false);
         configuration = null;
     }
@@ -120,7 +155,7 @@ internal sealed class DesktopSession
         lock (sync) return Allowed(now);
     }
     private bool Allowed(TimeSpan now) => state.Running && !state.Stopping && state.Track is not null
-        && state.Settled && !state.Busy && !state.NetworkBlocked && command is null && now >= state.CooldownUntil;
+        && state.DeviceReady && state.Settled && !state.Busy && !state.RecoveryWaiting && !state.NetworkBlocked && command is null && now >= state.CooldownUntil;
     internal bool QueueRecheck(TrackVersion? expected, TimeSpan now)
     {
         lock (sync)
@@ -143,14 +178,14 @@ internal sealed class DesktopSession
     {
         lock (sync)
         {
-            if (!state.Running || state.Stopping || state.NetworkBlocked || state.Busy || state.Track != track) return null;
+            if (!state.Running || state.Stopping || state.NetworkBlocked || !state.DeviceReady || Lifecycle.IsPaused || state.Busy || state.Track != track) return null;
             state = state with { Busy = true, AttemptId = ++attempt, Check = "核对中" };
             return new(track, attempt);
         }
     }
     internal bool CanApply(LyricAttempt? value)
     {
-        lock (sync) return value is not null && state.Running && !state.Stopping && !state.NetworkBlocked
+        lock (sync) return value is not null && state.Running && !state.Stopping && !state.NetworkBlocked && state.DeviceReady && !Lifecycle.IsPaused
             && value.Track.RunId == state.RunId && state.Track == value.Track && state.AttemptId == value.AttemptId;
     }
     internal void Complete(LyricAttempt? value, string result, TimeSpan now)
@@ -176,10 +211,10 @@ internal sealed class DesktopSession
     }
     internal void Stop()
     {
-        lock (sync) { CancelParameters(); command = null; state = state with { Stopping = true }; }
+        lock (sync) { CancelParameters(); sourceChoice = null; FinishSource(false); command = null; state = state with { Stopping = true }; }
     }
     internal void End()
     {
-        lock (sync) { CancelParameters(); command = null; state = state with { Running = false, Stopping = false, Busy = false, Settled = false }; }
+        lock (sync) { CancelParameters(); sourceChoice = null; FinishSource(false); command = null; state = state with { Running = false, Stopping = false, Busy = false, Settled = false }; }
     }
 }

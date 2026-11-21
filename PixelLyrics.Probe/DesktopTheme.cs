@@ -73,8 +73,8 @@ internal sealed class DesktopTheme : IDisposable
                       <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
                     </Border>
                     <ControlTemplate.Triggers>
-                      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="frame" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/><Setter TargetName="frame" Property="Background" Value="{DynamicResource HoverBrush}"/><Setter Property="Foreground" Value="{DynamicResource TextBrush}"/></Trigger>
-                      <Trigger Property="IsPressed" Value="True"><Setter TargetName="frame" Property="BorderBrush" Value="{DynamicResource TextBrush}"/></Trigger>
+                      <Trigger Property="IsMouseOver" Value="True"><Setter TargetName="frame" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/><Setter TargetName="frame" Property="Opacity" Value="0.85"/></Trigger>
+                      <Trigger Property="IsPressed" Value="True"><Setter TargetName="frame" Property="BorderBrush" Value="{DynamicResource TextBrush}"/><Setter TargetName="frame" Property="Opacity" Value="0.7"/></Trigger>
                       <Trigger Property="IsKeyboardFocused" Value="True"><Setter TargetName="frame" Property="BorderBrush" Value="{DynamicResource AccentBrush}"/><Setter TargetName="frame" Property="BorderThickness" Value="2"/></Trigger>
                       <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.4"/></Trigger>
                     </ControlTemplate.Triggers>

@@ -9,7 +9,68 @@ namespace PixelLyrics.Probe;
 
 internal sealed class ScreenOutput
 {
-    private readonly PixelBarClient client;
+    private readonly Action<string, byte[]> send;
+    private string? path;
+    internal bool ReconnectEnabled { get; private set; }
+    internal bool Ready => path is not null && !HasFailed;
+    internal string ConnectionStatus { get; private set; } = "等待连接 USB 歌词屏";
+    private TimeSpan nextScan;
+    private TimeSpan candidateSince;
+    private string? candidate;
+    private string? failedPath;
+    private int failures;
+    private int deviceRevision = -1;
+    internal static ScreenOutput Waiting(Action<string, byte[]>? transport = null) => new(null, transport) { ReconnectEnabled = true };
+    internal bool RefreshConnection(TimeSpan now, int revision)
+    {
+        if (!ReconnectEnabled) return Ready;
+        if (revision == deviceRevision && now < nextScan) return Ready;
+        deviceRevision = revision;
+        string[] paths;
+        try { paths = PixelBarClient.ListDevices().Where(IsStrict).Select(d => d.DevicePath).ToArray(); }
+        catch { paths = []; }
+        bool ready = ObserveDevices(paths, now);
+        nextScan = now + TimeSpan.FromSeconds(candidate is not null && !ready ? 1 : 5);
+        return ready;
+    }
+    internal bool ObserveDevices(string[] paths, TimeSpan now)
+    {
+        string? unique = paths.Length == 1 ? paths[0] : null;
+        if (failedPath is not null && !paths.Contains(failedPath)) { failedPath = null; failures = 0; }
+        if (unique == path && Ready) return true;
+        path = null; lastText = null; ownsLyrics = false; HasDisplayableLyrics = false; ClockRequested = false;
+        if (unique is null)
+        {
+            candidate = null;
+            ConnectionStatus = paths.Length > 1 ? "检测到多个歌词屏，请仅连接一个" : "歌词屏已断开，等待连接";
+            return false;
+        }
+        if (unique == failedPath && failures >= 2)
+        {
+            ConnectionStatus = "USB 连续写入失败，请拔插歌词屏后恢复";
+            return false;
+        }
+        if (candidate != unique) { candidate = unique; candidateSince = now; }
+        if (now - candidateSince < TimeSpan.FromSeconds(1))
+        { ConnectionStatus = "正在确认歌词屏连接"; return false; }
+        path = unique; HasFailed = false; candidate = null;
+        ConnectionStatus = "歌词屏已连接";
+        return true;
+    }
+    private void Failed(Exception ex)
+    {
+        failedPath = path; failures++; HasFailed = true; candidate = null;
+        ConnectionStatus = "USB 写入失败，正在重新校验连接；实际显示未知";
+        Program.ReportDesktopLog($"USB 写入失败：{ex.GetType().Name}；连续失败 {failures} 次；实际显示未知。");
+    }
+    private void WriteText(string text, TextDisplayEffect effect)
+    {
+        if (path is null) throw new InvalidOperationException();
+        send(path, effect == TextDisplayEffect.Static
+            ? TextLayoutReportEncoder.EncodeStatic(PixelTextAlignment.Left)
+            : TextLayoutReportEncoder.EncodeScroll(TextScrollDirection.RightToLeft));
+        send(path, TextReportEncoder.Encode(text));
+    }
     public bool HasFailed { get; private set; }
     public int SuccessfulWrites { get; private set; }
     private string? lastText;
@@ -27,10 +88,10 @@ internal sealed class ScreenOutput
     {
         // Validate before transport; switching styles does not set the device time.
         PatternReportEncoder.Encode(style);
-        if (HasFailed) return false;
+        if (!Ready) return false;
         try
         {
-            client.ShowClock(style);
+            send(path!, PatternReportEncoder.Encode(style));
             SuccessfulWrites++;
             ownsLyrics = false;
             ClockRequested = true;
@@ -39,14 +100,14 @@ internal sealed class ScreenOutput
             lastLineKey = null;
             return true;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            HasFailed = true;
+            Failed(ex);
             return false;
         }
     }
 
-    private ScreenOutput(string path) => client = new PixelBarClient(path);
+    private ScreenOutput(string? path, Action<string, byte[]>? transport = null) { this.path = path; send = transport ?? BoundedHidTransport.Send; }
 
     public static ScreenOutput? Enumerate(bool enableOutput)
     {
@@ -106,7 +167,7 @@ internal sealed class ScreenOutput
         try
         {
             token.ThrowIfCancellationRequested();
-            client.ShowText(text, TextDisplayEffect.Scroll, PixelTextAlignment.Left, TextScrollDirection.RightToLeft);
+            WriteText(text, TextDisplayEffect.Scroll);
             ownsLyrics = true;
             lastText = null;
             Console.WriteLine("原生向左滚动测试已发送一次，保持12秒；没有循环重发文字。请观察完整文字及两侧显示。");
@@ -154,10 +215,10 @@ internal sealed class ScreenOutput
 
     private bool Send(string text, TextDisplayEffect effect = TextDisplayEffect.Static, bool force = false)
     {
-        if (HasFailed || (!force && text == lastText && effect == lastEffect)) return false;
+        if (!Ready || (!force && text == lastText && effect == lastEffect)) return false;
         try
         {
-            client.ShowText(text, effect, PixelTextAlignment.Left, TextScrollDirection.RightToLeft);
+            WriteText(text, effect);
             SuccessfulWrites++;
             Console.WriteLine($"USB 写入完成 #{SuccessfulWrites}，UTF-8字节数={Encoding.UTF8.GetByteCount(text)}（不代表屏幕可见，需人工确认）。");
             lastText = text;
@@ -166,8 +227,7 @@ internal sealed class ScreenOutput
         }
         catch (Exception ex)
         {
-            HasFailed = true;
-            Console.Error.WriteLine($"USB 输出异常（{ex.GetType().Name}），本次进程停止所有写屏，不重试、不重选设备；屏上可能仍有旧内容。");
+            Failed(ex);
             return false;
         }
     }

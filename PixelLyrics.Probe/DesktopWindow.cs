@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -20,7 +20,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
     private PlayerMode SelectedPlayer => _player.SelectedValue is PlayerMode mode ? mode : PlayerMode.Auto;
     private readonly CheckBox _authorization = new() { Content = "允许本次联网获取 QQ、网易云音乐歌词并输出到 USB 歌词屏", IsChecked = false };
     private readonly Button _start = MakeButton("开始运行");
-    private readonly Button _stop = MakeButton("停止并清屏");
+    private readonly Button _stop = MakeButton("停止并显示时钟");
     private readonly Button _recheck = MakeButton("重新核对曲目");
     private readonly TextBlock _sessionPanel = Text("尚无运行会话。");
     private readonly TextBlock _parameterHint = Text("等待配置快照。");
@@ -77,6 +77,9 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
     private readonly DesktopTheme _theme;
     private bool? _savedStartup;
+    private bool _savedAutoRun;
+    private bool _initialLoad = true;
+    private readonly CheckBox _autoRun = new() { Content = "打开应用后自动运行" };
     private string _configurationError = "";
     private readonly TextBox _title = ScreenText("尚未开始", 32);
     private readonly TextBox _artist = ScreenText("");
@@ -124,7 +127,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
         _trayMenu = new System.Windows.Forms.ContextMenuStrip();
         _trayMenu.Items.Add("打开控制台", null, (_, _) => Dispatch(ShowFromTray));
-        _trayStop = new System.Windows.Forms.ToolStripMenuItem("停止并清屏");
+        _trayStop = new System.Windows.Forms.ToolStripMenuItem("停止并显示时钟");
         _trayStop.Click += (_, _) => Dispatch(async () => await StopAsync());
         _trayMenu.Items.Add(_trayStop);
         _trayMenu.Items.Add("退出", null, (_, _) => Dispatch(async () => await ExitAsync()));
@@ -136,6 +139,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
             Visible = true
         };
         _tray.DoubleClick += (_, _) => Dispatch(ShowFromTray);
+        _tray.MouseClick += (_, e) => { if (e.Button == System.Windows.Forms.MouseButtons.Left && _session?.Latest.NeedsSource == true) Dispatch(OpenSourceChoice); };
         _logTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromMilliseconds(150) };
         _logTimer.Tick += DrainLogs;
         _logTimer.Start();
@@ -176,10 +180,12 @@ internal sealed partial class DesktopWindow : Window, IDisposable
             BeginConfiguration(save: false);
         };
         Closing += OnClosing;
+        Microsoft.Win32.SystemEvents.PowerModeChanged += OnPowerChanged;
+        SourceInitialized += (_, _) => System.Windows.Interop.HwndSource.FromHwnd(new System.Windows.Interop.WindowInteropHelper(this).Handle)?.AddHook(SystemMessage);
         StateChanged += (_, _) => { if (WindowState == WindowState.Minimized && !_allowClose) Hide(); };
         foreach (var combo in new[] { _width, _hold, _clockStyle, _idleClockDelay, _trackIntroHold, _noLyricsTitleHold, _pollInterval, _trackSettle, _requestTimeout })
             combo.SelectionChanged += (_, _) => RefreshSettingsFeedback();
-        foreach (var check in new[] { _idleClock, _trackIntro, _loginStartup })
+        foreach (var check in new[] { _idleClock, _trackIntro, _loginStartup, _autoRun })
         {
             check.Checked += (_, _) => { UpdateControls(); RefreshSettingsFeedback(); };
             check.Unchecked += (_, _) => { UpdateControls(); RefreshSettingsFeedback(); };
@@ -190,7 +196,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
     private static Button MakeButton(string text) => new()
     {
-        Content = text, Padding = new Thickness(16, 8, 16, 8), Margin = new Thickness(0, 0, 8, 0),
+        Content = text, Padding = new Thickness(16, 8, 16, 8), Margin = new Thickness(0, 0, 12, 8),
         MinHeight = 40, HorizontalAlignment = HorizontalAlignment.Left, Cursor = System.Windows.Input.Cursors.Hand
     };
 
@@ -304,7 +310,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
     private void RefreshSettingsFeedback()
     {
         if (_requestTimeout.SelectedItem is null) return;
-        bool dirty = _savedParameters is not null && (CaptureParameters() != _savedParameters || _loginStartup.IsChecked != _savedStartup);
+        bool dirty = _savedParameters is not null && (CaptureParameters() != _savedParameters || _loginStartup.IsChecked != _savedStartup || (_autoRun.IsChecked == true) != _savedAutoRun);
         _saveHint.Text = _exiting ? "正在安全退出，请等待"
             : _configurationBusy ? (_lastConfigurationResult == "已保存，正在应用" ? _lastConfigurationResult : "保存中")
             : _configurationError.Length > 0 ? _configurationError
@@ -324,10 +330,12 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
     private void RefreshSessionPanel()
     {
+        RefreshSourceChoice();
         var s = _session?.Latest;
         _displayedTrack = s?.Track;
         _recheck.IsEnabled = !_exiting && !_stopping && !_clockBusy && _running
             && _session?.CanRecheck(_session.Clock.Elapsed) == true;
+        IconLabel(_recheck, "", s?.RecoveryManual == true ? "重新尝试" : "重新核对曲目");
         _title.Text = s?.Title ?? (s?.Running == true ? "等待播放器开始播放" : "尚未开始");
         _artist.Text = s?.Artist ?? "";
         _diagnosticValues[0].Text = s?.Source?.DisplayName() ?? (s?.Running == true ? "等待识别" : SelectedPlayer.DisplayName());
@@ -340,7 +348,8 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         string playback = s?.Playback switch { "Playing" => "播放中", "Paused" => "已暂停", "Stopped" => "已停止", "Closed" => "播放器已关闭", "Opened" => "等待播放", _ => s?.Playback ?? "" };
         _playback.Text = s is null ? "" : string.Join(" · ", new[] { s.Source?.DisplayName(), playback, s.SourceNotice }.Where(v => !string.IsNullOrWhiteSpace(v)));
         _check.Text = s is null ? "" : "歌词 · " + s.Check;
-        _output.Text = s?.Display == "设备写入失败；实际显示未知" ? "设备写入失败，请停止后检查 USB 连接" : "";
+        _output.Text = s?.Display ?? "";
+        if (_running) _tray.Text = "PixelLyrics · " + (s?.DeviceReady == false ? "等待设备" : s?.Playback == "Playing" ? "同步中" : "等待播放");
         _artist.Visibility = _artist.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         _check.Visibility = _check.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
         _output.Visibility = _output.Text.Length == 0 ? Visibility.Collapsed : Visibility.Visible;
@@ -355,19 +364,20 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         var draft = CaptureParameters();
         _parameterHint.Text = $"编辑值 ↔ 已保存：{draft.Differences(_savedParameters)}\n"
             + (s?.Running == true ? $"编辑值 ↔ 本次运行：{draft.Differences(s.Active)}（保存后应用）\n已保存 ↔ 本次运行：{_savedParameters?.Differences(s.Active) ?? "无快照"} · 版本 {s.ParameterVersion}" : "本次运行值：当前未运行")
-            + "\n自启独立于 JSON；授权和绑定不参与参数差异比较。";
+            + "\n自启独立于 JSON；自动运行授权随配置保存。";
     }
 
     private void UpdateControls()
     {
-        _start.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy && _settingsValid && _authorization.IsChecked == true;
+        _start.IsEnabled = !_exiting && !_running && !_stopping && !_clockBusy && !_configurationBusy && _settingsValid && (_savedAutoRun || _authorization.IsChecked == true);
         _stop.IsEnabled = !_exiting && _running && !_stopping;
         _trayStop.Enabled = _stop.IsEnabled;
         _save.IsEnabled = !_exiting && !_stopping && !_clockBusy && !_configurationBusy && _settingsValid;
         _reload.IsEnabled = !_exiting && !_stopping && !_clockBusy && !_configurationBusy;
-        _authorization.IsEnabled = !_exiting && !_running;
+        _authorization.IsEnabled = !_exiting && !_running && !_savedAutoRun;
+        _authorization.Visibility = _savedAutoRun ? Visibility.Collapsed : Visibility.Visible;
         _player.IsEnabled = !_exiting && !_stopping && !_clockBusy;
-        _loginStartup.IsEnabled = !_exiting && !_stopping && !_clockBusy;
+        _autoRun.IsEnabled = _loginStartup.IsEnabled = !_exiting && !_stopping && !_clockBusy;
         _offset.IsEnabled = !_exiting;
         _clock.IsEnabled = !_exiting && !_clockBusy && !_stopping && !_configurationBusy && _settingsValid;
         _idleClock.IsEnabled = !_exiting && !_clockBusy;
@@ -399,6 +409,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
     private ProbeSettings CaptureRuntimeSettings() => new()
     {
+        AutoRun = _autoRun.IsChecked == true,
         Mode = SelectedPlayer,
         Player = SelectedPlayer == PlayerMode.NetEaseMusic ? MusicPlayer.NetEaseMusic : MusicPlayer.QQMusic,
         IdleClockEnabled = _idleClock.IsChecked == true,
@@ -420,12 +431,15 @@ internal sealed partial class DesktopWindow : Window, IDisposable
 
     private async Task ConfigureAsync(bool save, int offset, int width, int hold, int clockStyle, ProbeSettings runtimeSettings, bool loginStartup)
     {
+        bool wasAutoRun = _savedAutoRun;
         _configuration.Text = save ? "正在保存配置，请等待实际 I/O 完成……" : "正在读取配置……";
         try
         {
             var savedSession = _session;
             var settings = await Task.Run(() =>
             {
+                lock (ProbeSettings.FileSync)
+                {
                 // 每次保存重新验证磁盘内容，禁止以默认配置覆盖已经损坏的文件。
                 var current = ProbeSettings.Load(_settingsPath);
                 if (save)
@@ -439,12 +453,15 @@ internal sealed partial class DesktopWindow : Window, IDisposable
                     current.Save(_settingsPath);
                 }
                 return current;
+                }
             });
             _settingsValid = true;
             // 使用实际保存的捕获值，不能把 I/O 期间仍可编辑的 Draft 当作已保存。
             _savedParameters = DesktopParameters.From(settings);
+            _savedAutoRun = settings.AutoRun;
             if (!save)
             {
+                _autoRun.IsChecked = settings.AutoRun;
                 _player.SelectedValue = settings.Mode;
                 _offset.Value = settings.OffsetMs;
                 _width.SelectedItem = settings.DisplayWidthUnits;
@@ -479,7 +496,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
                     _configurationError = "参数已应用；设备写入失败，实际显示未知";
             }
             else if (save) _lastConfigurationResult = "已保存";
-            _configuration.Text = save ? "JSON 配置已保存；授权未保存。" : "配置已加载；未自动联网或写屏。";
+            _configuration.Text = save ? "配置已保存。" : "配置已加载。";
         }
         catch (Exception exception)
         {
@@ -525,12 +542,15 @@ internal sealed partial class DesktopWindow : Window, IDisposable
             _configuration.Text += "\n" + _settingsPath + "\n自启开关独立存储在当前用户注册表，不在此 JSON 内。";
             _configurationBusy = false;
             UpdateControls();
+            bool startAutomatically = RunLifecycle.ShouldAutoStart(_initialLoad, save, wasAutoRun, _savedAutoRun, _settingsValid);
+            _initialLoad = false;
+            if (startAutomatically) Start();
         }
     }
 
     private void Start()
     {
-        if (_exiting || _running || _stopping || _clockBusy || _configurationBusy || !_settingsValid || _authorization.IsChecked != true) return;
+        if (_exiting || _running || _stopping || _clockBusy || _configurationBusy || !_settingsValid || (!_savedAutoRun && _authorization.IsChecked != true)) return;
         if (_savedParameters is not { } saved) return;
         var savedSettings = new ProbeSettings();
         saved.ApplyTo(savedSettings);
@@ -553,15 +573,15 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         {
             // 设备或配置 I/O 可能同步阻塞，不能在 UI 线程直接调用入口。
             int result = await Task.Run(() => Program.RunDesktopAsync(offset, _settingsPath, false, cancellation.Token, width, hold, runtimeSettings, _session));
-            _status.Text = result == 0 ? "运行任务已退出；不会自动重新启动。" : $"运行任务已退出（返回码 {result}）；请查看安全日志，勿视为清屏成功。";
+            _status.Text = result == 0 ? "运行任务已退出；不会自动重新启动。" : $"运行任务已退出（返回码 {result}）；请查看安全日志，勿视为回钟成功。";
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
         {
-            _status.Text = "运行任务已响应取消并退出；清屏结果以安全日志为准。";
+            _status.Text = "运行任务已响应取消并退出；回钟结果以安全日志为准。";
         }
         catch (Exception exception)
         {
-            _status.Text = $"运行任务异常退出（{exception.GetType().Name}）；未自动重试，不能确认清屏成功。";
+            _status.Text = $"运行任务异常退出（{exception.GetType().Name}）；未自动重试，不能确认回钟成功。";
         }
         finally
         {
@@ -588,7 +608,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         _stopping = true;
         _session?.Stop();
         RefreshSessionPanel();
-        _status.Text = "正在请求取消，等待运行任务退出及正常清屏流程；I/O 阻塞时将继续等待，不强杀。";
+        _status.Text = "正在请求取消，等待运行任务退出并尝试显示时钟；USB 写入有超时限制。";
         UpdateControls();
         _stopTask = CancelAndWaitAsync(_cancellation, _runTask);
         return _stopTask;
@@ -621,7 +641,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         UpdateControls();
         try
         {
-            await StopAsync(); // Await the lyric writer and its final clear before mode switch.
+            await StopAsync(); // Await the lyric writer and its final clock write before mode switch.
             if (_exiting) return;
             _status.Text = "正在请求切换时钟；等待USB写入完成……";
             bool? result = await Task.Run(() =>
@@ -662,6 +682,32 @@ internal sealed partial class DesktopWindow : Window, IDisposable
         System.Windows.Application.Current.Shutdown(0);
     }
 
+    private IntPtr SystemMessage(IntPtr hwnd, int message, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        if (message == 0x0219) _session?.Lifecycle.DeviceChanged();
+        if (message == 0x0011) // WM_QUERYENDSESSION: no modal dialog during shutdown/logoff.
+        {
+            _exiting = true;
+            _session?.Lifecycle.EndSession();
+            handled = true;
+            return new IntPtr(1);
+        }
+        if (message == 0x0016 && wParam != IntPtr.Zero)
+        {
+            _allowClose = true;
+            System.Windows.Application.Current.Shutdown();
+        }
+        else if (message == 0x0016) { _exiting = false; _session?.Lifecycle.Resume(); UpdateControls(); }
+        return IntPtr.Zero;
+    }
+
+    private void OnPowerChanged(object sender, Microsoft.Win32.PowerModeChangedEventArgs args)
+    {
+        var lifecycle = _session?.Lifecycle;
+        if (args.Mode == Microsoft.Win32.PowerModes.Suspend) lifecycle?.EndSession();
+        else if (args.Mode == Microsoft.Win32.PowerModes.Resume) lifecycle?.Resume();
+    }
+
     private void OnClosing(object? sender, CancelEventArgs e)
     {
         if (_allowClose) return;
@@ -686,7 +732,7 @@ internal sealed partial class DesktopWindow : Window, IDisposable
             dialog.SetResourceReference(Control.ForegroundProperty, "TextBrush");
             var panel = new StackPanel { Margin = new Thickness(24) };
             panel.Children.Add(new TextBlock { Text = "接下来如何处理？", FontSize = 22, FontWeight = FontWeights.SemiBold });
-            panel.Children.Add(Text("缩到托盘：隐藏窗口，当前歌词任务继续运行。\n退出程序：先停止任务并尝试清屏，再安全退出。\n未保存的设置不会自动写入，请需要时先取消并保存。"));
+            panel.Children.Add(Text("缩到托盘：隐藏窗口，当前歌词任务继续运行。\n退出程序：先停止任务并尝试显示时钟，再安全退出。\n未保存的设置不会自动写入，请需要时先取消并保存。"));
             var buttons = new WrapPanel();
             var tray = MakeButton("缩到托盘");
             var quit = MakeButton("退出程序");
@@ -763,7 +809,10 @@ internal sealed partial class DesktopWindow : Window, IDisposable
     public void Dispose()
     {
         if (_disposed) return;
+        _sourcePicker?.Close();
+        _blankTrayIcon?.Dispose();
         _disposed = true;
+        Microsoft.Win32.SystemEvents.PowerModeChanged -= OnPowerChanged;
         _theme.Dispose();
         Volatile.Write(ref _acceptLogs, 0);
         Program.DesktopLog -= ReceiveLog;

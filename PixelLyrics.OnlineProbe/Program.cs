@@ -1,4 +1,4 @@
-using System.Globalization;
+﻿using System.Globalization;
 using System.Net;
 using System.Net.Http.Json;
 using System.Text;
@@ -10,7 +10,7 @@ namespace PixelLyrics.OnlineProbe;
 
 internal static class Program
 {
-    internal const string Disclosure = "联网说明：仅在显式指定 --allow-online --title --artist 后，向 QQ音乐 c.y.qq.com 发送歌名及歌手用于分阶段搜索，歌手仍在本地严格核对，向 u.y.qq.com 发送候选 songMID 核对详情，仅综合评分及领先差达标才获取歌词；不发送 Cookie、Authorization 或播放进度。自动选择需 --duration，专辑仅在本地软评分，重要版本冲突拒绝。不登录、不解密、不重试。";
+    internal const string Disclosure = "联网说明：仅在显式指定 --allow-online --title --artist 后，向 QQ音乐 c.y.qq.com 发送歌名及歌手用于分阶段搜索，歌手仍在本地严格核对，向 u.y.qq.com 发送候选 songMID 核对详情，仅综合评分及领先差达标才获取歌词；不发送 Cookie、Authorization 或播放进度。自动选择需 --duration，专辑仅在本地软评分，重要版本冲突拒绝。不登录、不解密；临时请求失败有限重试，限流等待恢复。";
 
     private static async Task<int> Main(string[] args)
     {
@@ -26,8 +26,8 @@ internal static class Program
             Options options = Options.Parse(args);
             Console.WriteLine(Disclosure);
             using var client = new OnlineLyricsClient();
-            // 整个搜索与取词流程共用十秒期限，不逐请求重置预算。
-            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            // Each HTTP attempt has its own timeout; caller cancellation covers the full operation.
+            using var deadline = new CancellationTokenSource();
             var selection = await client.RecallAsync(options.Title, options.Artist, options.Album,
                 options.Duration ?? double.NaN, deadline.Token, requiredMid: options.SongMid);
             if (selection.Winner is not { } winner)
@@ -50,7 +50,7 @@ internal static class Program
         }
         catch (Exception ex) when (ex is ProbeException or NoLyricsException or UntimedLyricsException or CandidateMetadataException or JsonException or HttpRequestException or OperationCanceledException or IOException or UnauthorizedAccessException or FormatException or ArgumentException)
         {
-            Console.Error.WriteLine("失败（不重试）：" + JsonSerializer.Serialize(ex.Message));
+            Console.Error.WriteLine("请求未完成：" + JsonSerializer.Serialize(ex.Message));
             return 1;
         }
     }

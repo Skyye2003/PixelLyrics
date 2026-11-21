@@ -18,38 +18,47 @@ internal static class FollowRunner
     internal static async Task<LoadedLyrics> LoadAsync(SongIdentity song, ProbeSongBinding? binding,
         CancellationToken token, Action? ensureNetworkAllowed = null, ILyricsSource? testClient = null,
         int requestTimeoutMs = 10000, MusicPlayer player = MusicPlayer.QQMusic, string? sourceSongId = null,
-        Func<Task>? beforeRequest = null)
+        Func<Task>? beforeRequest = null, RequestRecovery? recovery = null, Action<RequestNotice>? report = null, LyricSourceMapping? mapping = null)
     {
         ensureNetworkAllowed?.Invoke();
-        if (string.IsNullOrWhiteSpace(song.Artist) || string.IsNullOrWhiteSpace(song.Album))
+        if (mapping is null && (string.IsNullOrWhiteSpace(song.Artist) || string.IsNullOrWhiteSpace(song.Album)))
             throw new MatchUnavailableException(MatchCategory.InvalidMetadata);
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         if (requestTimeoutMs is < 2000 or > 30000) throw new ArgumentOutOfRangeException(nameof(requestTimeoutMs));
-        deadline.CancelAfter(TimeSpan.FromMilliseconds(requestTimeoutMs));
+
+        if (mapping is not null) { player = mapping.Platform; binding = new(mapping.SongId); sourceSongId = null; }
         using ILyricsSource? ownedClient = testClient is not null ? null : player == MusicPlayer.NetEaseMusic
             ? new NetEaseLyricsClient(requestTimeoutMs) : new OnlineLyricsClient(requestTimeoutMs);
         ILyricsSource client = testClient ?? ownedClient!;
         if (player == MusicPlayer.NetEaseMusic && sourceSongId is not null) binding = new(sourceSongId);
+        if (client is OnlineLyricsClient qq) { if (recovery is not null) qq.Recovery = recovery; if (beforeRequest is not null) qq.BeforeRequest = _ => beforeRequest(); qq.Report = report; }
+        if (client is NetEaseLyricsClient ne) { if (recovery is not null) ne.Recovery = recovery; if (beforeRequest is not null) ne.BeforeRequest = _ => beforeRequest(); ne.Report = report; }
+        bool guardsRequests = client is OnlineLyricsClient or NetEaseLyricsClient;
         SongSelection selection;
         if (binding is null)
             selection = await client.RecallAsync(song.Title, song.Artist, song.Album,
-                song.Duration.TotalSeconds, deadline.Token, ensureNetworkAllowed, beforeRequest: beforeRequest);
+                song.Duration.TotalSeconds, deadline.Token, ensureNetworkAllowed, beforeRequest: guardsRequests ? null : beforeRequest);
         else
         {
             deadline.Token.ThrowIfCancellationRequested();
-            if (beforeRequest is not null) await beforeRequest();
+            if (!guardsRequests && beforeRequest is not null) await beforeRequest();
             ensureNetworkAllowed?.Invoke();
             try
             {
                 var details = await client.GetDetailsAsync(binding.Mid, deadline.Token);
-                selection = SongMatcher.Rank([details], song.Title, song.Artist, song.Album,
+                if (mapping is not null)
+                {
+                    var verified = SongMatcher.EvaluateTrial(details, song.Title, song.Artist, song.Album, song.Duration.TotalSeconds);
+                    selection = new(verified.Category, verified.Category == MatchCategory.Accepted ? verified : null, [verified]);
+                }
+                else selection = SongMatcher.Rank([details], song.Title, song.Artist, song.Album,
                     song.Duration.TotalSeconds, binding.ArtistAlias);
             }
             catch (CandidateMetadataException) { throw new MatchUnavailableException(MatchCategory.InvalidMetadata); }
         }
         if (selection.Winner is null) throw new MatchUnavailableException(selection.Category);
         deadline.Token.ThrowIfCancellationRequested();
-        if (beforeRequest is not null) await beforeRequest();
+        if (!guardsRequests && beforeRequest is not null) await beforeRequest();
         ensureNetworkAllowed?.Invoke();
         var result = await client.FetchAsync(selection.Winner.Details.Mid, deadline.Token);
         token.ThrowIfCancellationRequested();
@@ -63,7 +72,7 @@ internal static class FollowRunner
         var runId = session.Latest.RunId;
         LyricAttempt? pendingAttempt = null;
         string checkState = "等待曲目稳定";
-        Program.ReportDesktopLog($"自动跟随已启用：选择模式为{settings.Mode.DisplayName()}；切换来源取消旧请求。失败不自动重试；不输出歌词正文。配置不会保存联网授权。");
+        Program.ReportDesktopLog($"自动跟随已启用：选择模式为{settings.Mode.DisplayName()}；切换来源取消旧请求。临时故障自动重试，单曲异常不影响下一首；不输出歌词正文。自动运行授权由独立开关控制。");
         var started = session.Clock;
         media.Mode = settings.Mode;
         session.RememberBindings(settings);
@@ -74,6 +83,7 @@ internal static class FollowRunner
         CancellationTokenSource? requestCancellation = null;
         Task<LoadedLyrics>? pending = null;
         long pendingGeneration = -1;
+        int pendingLifecycle = -1;
         string? pendingSourceId = null;
         MusicPlayer pendingPlayer = MusicPlayer.QQMusic;
         LyricsDocument? lyrics = null;
@@ -81,16 +91,29 @@ internal static class FollowRunner
         long lastAdvance = 0;
         int advanceCount = 0;
         bool attempted = false;
-        int networkBlocked = 0;
+        int lifecycleRevision = session.Lifecycle.Revision;
+        bool unavailable = false;
+        bool suppressIntro = false;
+        bool hadTrack = false;
+        bool pauseClockSent = false;
+        var recoveries = session.Recoveries;
+        LyricSourceMapping? pendingMapping = null;
+        var reminder = new SourceReminder();
+        string? occurrence = null;
         async Task<LoadedLyrics> LoadGuarded(SongIdentity song, ProbeSongBinding? binding, CancellationToken requestToken, string? sourceSongId, MusicPlayer source, int timeout, LyricAttempt attempt, long generation)
         {
+            int requestLifecycle = session.Lifecycle.Revision;
+            var mapping = pendingMapping;
+            var lyricsSource = mapping?.Platform ?? source;
             try
             {
                 return await LoadAsync(song, binding, requestToken, () =>
                 {
                     requestToken.ThrowIfCancellationRequested();
-                    if (Volatile.Read(ref networkBlocked) != 0) throw new OperationCanceledException();
-                }, requestTimeoutMs: timeout, player: source, sourceSongId: sourceSongId,
+                    if (session.Lifecycle.IsPaused || requestLifecycle != session.Lifecycle.Revision) throw new OperationCanceledException();
+
+                }, requestTimeoutMs: timeout, player: source, sourceSongId: sourceSongId, recovery: recoveries[lyricsSource], mapping: mapping,
+                    report: notice => { if (session.CanApply(attempt)) { session.Update(s => s with { Check = notice.Message }); Program.ReportDesktopLog($"{source.DisplayName()}；歌曲 ID {SafeSongId(sourceSongId ?? binding?.Mid)}；{notice.Stage}；尝试 {notice.Attempt}；{notice.Message}"); } },
                     beforeRequest: async () =>
                     {
                         var current = await media.ReadAsync(requestToken);
@@ -101,20 +124,17 @@ internal static class FollowRunner
                             throw new OperationCanceledException();
                     });
             }
-            catch (Exception ex) when (ex is ProbeException or HttpRequestException)
+            catch (LyricsRequestException ex)
             {
-                Interlocked.Exchange(ref networkBlocked, 1);
-                string reason = ex is ProbeException protocol ? SafeFailureReason(protocol) : "网络请求失败";
-                string context = sourceSongId is { Length: > 0 and <= 19 } && sourceSongId.All(char.IsAsciiDigit)
-                    ? $"；歌曲 ID {sourceSongId}" : "";
-                session.BlockNetwork(runId, reason + context);
-                Program.ReportDesktopLog($"联网锁止：{reason}{context}；本次运行停止后续联网，请停止后重新开始。");
+                if (session.CanApply(attempt))
+                    Program.ReportDesktopLog($"请求失败：{source.DisplayName()}；歌曲 ID {SafeSongId(sourceSongId ?? binding?.Mid)}；{ex.Stage}；{ex.Kind}；{ex.Message}");
                 throw;
             }
         }
+
         string fallbackMessage = settings.TrackIntroEnabled
-            ? "；开场结束后切时钟，不追加歌名停留，不自动重试。"
-            : "；显示当前歌名后切时钟，不自动重试。";
+            ? "；开场结束后切时钟，不追加歌名停留，下一首将自动继续。"
+            : "；显示当前歌名后切时钟，下一首将自动继续。";
         async Task ArmFallbackAsync()
         {
             var check = await media.ReadAsync(token);
@@ -145,7 +165,7 @@ internal static class FollowRunner
                         updateClock = options.Send && screen.ClockRequested && !screen.HasFailed && old.ClockStyle != parameters.ClockStyle;
                     }
                 });
-                if (updateClock && !session.Latest.Stopping)
+                if (updateClock && !session.Latest.Stopping && !session.Lifecycle.IsPaused)
                 {
                     token.ThrowIfCancellationRequested();
                     screen!.ShowClock(settings.ClockStyle);
@@ -153,11 +173,51 @@ internal static class FollowRunner
                 }
                 if (applied) Program.ReportDesktopLog($"配置版本 {session.Latest.ParameterVersion} 已应用" + (screen?.HasFailed == true ? "；设备写入失败，实际显示未知。" : "。"));
                 token.ThrowIfCancellationRequested();
+                bool pausedBySystem = session.Lifecycle.IsPaused;
+                bool deviceReady = !options.Send || (pausedBySystem ? screen!.Ready : screen!.RefreshConnection(started.Elapsed, session.Lifecycle.DeviceRevision));
+                bool lifecycleChanged = lifecycleRevision != session.Lifecycle.Revision;
+                if (lifecycleChanged || (!deviceReady || pausedBySystem) && !unavailable)
+                {
+                    lifecycleRevision = session.Lifecycle.Revision;
+                    pauseClockSent = false;
+                    requestCancellation?.Cancel();
+                    if (pending is not null) ObserveAbandoned(pending);
+                    pending = null; requestCancellation?.Dispose(); requestCancellation = null;
+                    pendingAttempt = null; lyrics = null; attempted = false;
+                    gate.Observe(null, -1, started.Elapsed);
+                    fallback.Reset(); intro.Start(gate.Generation, null, started.Elapsed);
+                    previous = null; advanceCount = 0; lastAdvance = 0;
+                    suppressIntro = hadTrack;
+                    Program.ReportDesktopLog(pausedBySystem ? "系统暂停：撤销旧请求并尝试显示时钟。" : "设备或系统状态变化：旧歌词及播放位置已失效。");
+                }
+                session.Update(s => s with { DeviceReady = deviceReady && !pausedBySystem });
+                if (pausedBySystem && !pauseClockSent)
+                {
+                    if (options.Send && deviceReady) screen!.ShowClock(settings.ClockStyle);
+                    pauseClockSent = true;
+                    session.Lifecycle.Acknowledge();
+                }
+                if (!pausedBySystem) pauseClockSent = false;
+                if (!deviceReady || pausedBySystem)
+                {
+                    unavailable = true;
+                    session.Update(s => s with { Track = null, Busy = false, Settled = false,
+                        Display = pausedBySystem ? "系统已暂停；恢复后重新校验播放进度" : screen!.ConnectionStatus });
+                    continue;
+                }
+                if (unavailable)
+                {
+                    unavailable = false;
+                    Program.ReportDesktopLog("连接已恢复：重新核对当前曲目及进度；保留接口限制。");
+                }
                 var snapshot = await media.ReadAsync(token);
                 if (session.Latest.Source != snapshot?.Player)
                     Program.ReportDesktopLog($"来源变化：{session.Latest.Source?.DisplayName() ?? "未绑定"} → {snapshot?.Player.DisplayName() ?? "不可用"}；旧歌词及位置绑定失效。");
                 bool usable = snapshot is not null && snapshot.Stable && media.IsCurrent(snapshot);
                 string? identity = usable ? snapshot!.Song.Id : null;
+                string? nextOccurrence = usable ? LyricSourceMappings.Key(snapshot!.Player, snapshot.Song.Id) : null;
+                if (nextOccurrence is not null && occurrence != nextOccurrence)
+                { occurrence = nextOccurrence; reminder.Reset(); session.SourceReminderSuppressed = false; }
                 long revision = usable ? snapshot!.Revision : -1;
                 if (gate.Observe(identity, revision, started.Elapsed))
                 {
@@ -172,10 +232,12 @@ internal static class FollowRunner
                     checkState = usable ? "等待曲目稳定" : media.UnavailableReason;
                     session.Update(s => s with { Track = usable ? new(runId, gate.Generation, snapshot!.Song.Id, snapshot.Revision) : null,
                         Title = usable ? snapshot!.Song.Title : null, Artist = usable ? snapshot!.Song.Artist : null,
+                        Song = usable ? snapshot!.Song : null, NeedsSource = false, Trial = false, Mapping = usable ? settings.SourceMappings.GetValueOrDefault(LyricSourceMappings.Key(snapshot!.Player, snapshot.Song.Id)) : null,
                         Busy = false, Settled = false, Check = s.NetworkBlocked ? s.Check : checkState });
                     fallback.Reset();
-                    intro.Start(gate.Generation, usable ? snapshot!.Song.Title : null, started.Elapsed,
+                    intro.Start(gate.Generation, usable && !suppressIntro ? snapshot!.Song.Title : null, started.Elapsed,
                         usable ? snapshot!.Song.Artist : null);
+                    if (usable) { suppressIntro = false; hadTrack = true; }
                     attempted = false;
                     advanceCount = 0;
                     lastAdvance = 0;
@@ -183,22 +245,66 @@ internal static class FollowRunner
                     if (options.Send) screen!.ClearLyrics();
                     Program.ReportDesktopLog(identity is null ? "会话暂不可用：旧词已失效。" : "检测到曲目或媒体版本变化，等待稳定后核对歌词。");
                 }
-                if (screen?.HasFailed == true) break;
+                if (screen?.HasFailed == true) { if (screen.ReconnectEnabled) continue; break; }
                 session.Update(s => s with { Source = snapshot?.Player, SourceNotice = media.Notice, Settled = usable && gate.IsSettled(started.Elapsed),
                     Playback = usable ? snapshot!.Status.ToString() : "会话不可用",
                     Check = s.NetworkBlocked ? s.Check : !usable ? media.UnavailableReason
                         : snapshot!.GetPosition() is null ? "播放进度不可用或已过期；请恢复播放并确认进度组件正常"
                         : s.Check == "播放进度不可用或已过期；请恢复播放并确认进度组件正常" ? checkState : s.Check });
+                if (session.TakeSource() is { } choice)
+                {
+                    try
+                    {
+                        if (session.Latest.Stopping || session.Latest.NetworkBlocked) { session.FinishSource(false); continue; }
+                        string key = LyricSourceMappings.Key(choice.Playback, choice.Song.Id);
+                        if (options.SettingsPath is null) throw new InvalidOperationException("缺少来源映射保存路径。");
+                        if (choice.Trial && (session.Latest.Track != choice.Track || !usable || snapshot?.Player != choice.Playback || snapshot.GetPosition() is null || !session.Latest.DeviceReady || session.Lifecycle.IsPaused))
+                        { session.FinishSource(false); continue; }
+                        if (!choice.Trial) lock (ProbeSettings.FileSync)
+                        {
+                            var disk = ProbeSettings.Load(options.SettingsPath);
+                            session.MergeBindings(disk);
+                            if (choice.Mapping is null) disk.SourceMappings.Remove(key); else disk.SourceMappings[key] = choice.Mapping;
+                            disk.Save(options.SettingsPath);
+                            if (choice.Mapping is null) settings.SourceMappings.Remove(key); else settings.SourceMappings[key] = choice.Mapping;
+                            session.RememberSource(key, choice.Mapping);
+                        }
+                        if (!choice.Trial && choice.Mapping is null) SourceHistory.Forget(options.SettingsPath, choice.Playback, choice.Song);
+                        else SourceHistory.Record(options.SettingsPath, choice.Playback, choice.Song, choice.Mapping, !choice.Trial && choice.Mapping is not null);
+                        if (session.Latest.Track == choice.Track && snapshot?.Player == choice.Playback)
+                        {
+                            requestCancellation?.Cancel();
+                            if (pending is not null) ObserveAbandoned(pending);
+                            pending = null; requestCancellation?.Dispose(); requestCancellation = null;
+                            bool keepLyrics = !choice.Trial && choice.Mapping is not null && session.Latest.Mapping == choice.Mapping && lyrics is not null;
+                            lyrics = keepLyrics ? lyrics : choice.Document; attempted = choice.Mapping is not null && lyrics is not null;
+                            fallback.Reset();
+                            checkState = choice.Trial && choice.Mapping is not null ? "正在试用 · 未确认" : choice.Mapping is null ? "重新自动核对" : "已记住所选来源";
+                            session.Update(s => s with { Busy = false, NeedsSource = false, Trial = choice.Trial && choice.Mapping is not null, Mapping = choice.Mapping, Check = checkState, AttemptId = s.AttemptId + 1 });
+                        }
+                        session.FinishSource(true);
+                    }
+                    catch (Exception ex) when (ex is System.IO.IOException or UnauthorizedAccessException or InvalidOperationException or System.Text.Json.JsonException)
+                    { Program.ReportDesktopLog("来源映射保存失败：" + ex.Message); session.FinishSource(false); }
+                }
+                var recovery = snapshot is null ? null : recoveries[session.Latest.Mapping?.Platform ?? snapshot.Player];
+                var remaining = recovery?.Remaining ?? TimeSpan.Zero;
+                bool accessDenied = recovery?.AccessDenied == true;
+                if (remaining > TimeSpan.Zero && !fallback.Active) await ArmFallbackAsync();
+                session.Update(s => s with { RecoveryWaiting = remaining > TimeSpan.Zero,
+                    RecoveryManual = accessDenied,
+                    Check = remaining > TimeSpan.Zero ? $"请求受限，{Math.Ceiling(remaining.TotalSeconds)} 秒后恢复" : accessDenied ? "接口访问受限，请重新尝试" : s.Check });
                 if (session.TakeRecheck(session.Latest.Track, started.Elapsed))
                 {
+                    recovery?.RetryAccess();
                     attempted = false;
                     lyrics = null;
                     fallback.Reset();
                     if (options.Send) screen!.ClearLyrics();
                     // 保留 MID 绑定和原开场计时，不重播开场。
                 }
-                if (Volatile.Read(ref networkBlocked) != 0) lyrics = null;
-                if (usable && snapshot!.GetPosition() is not null && !attempted && Volatile.Read(ref networkBlocked) == 0 && gate.IsSettled(started.Elapsed))
+
+                if (usable && snapshot!.GetPosition() is not null && !attempted && remaining == TimeSpan.Zero && !accessDenied && gate.IsSettled(started.Elapsed))
                 {
                     pendingAttempt = session.BeginAttempt(new(runId, gate.Generation, snapshot!.Song.Id, snapshot.Revision));
                     if (pendingAttempt is null) continue;
@@ -209,8 +315,10 @@ internal static class FollowRunner
                     else settings.Bindings.TryGetValue(snapshot!.Song.Id, out binding);
                     requestCancellation = CancellationTokenSource.CreateLinkedTokenSource(token);
                     pendingGeneration = gate.Generation;
+                    pendingLifecycle = session.Lifecycle.Revision;
                     pendingSourceId = snapshot.SourceSongId;
                     pendingPlayer = snapshot.Player;
+                    pendingMapping = settings.SourceMappings.GetValueOrDefault(LyricSourceMappings.Key(snapshot.Player, snapshot.Song.Id));
                     pending = LoadGuarded(snapshot.Song, binding, requestCancellation.Token, snapshot.SourceSongId, pendingPlayer, settings.RequestTimeoutMs, pendingAttempt, pendingGeneration);
                     Program.ReportDesktopLog("开始核对当前曲目；取词与可选歌名与歌手开场独立进行。");
                 }
@@ -223,51 +331,80 @@ internal static class FollowRunner
                         var loaded = await completed;
                         // Re-read after completion to close the request/track-change race.
                         var check = await media.ReadAsync(token);
-                        if (usable && session.CanApply(pendingAttempt) && gate.CanApply(pendingGeneration, check?.Song.Id, check?.Revision ?? -1)
+                        if (usable && pendingLifecycle == session.Lifecycle.Revision && session.CanApply(pendingAttempt) && gate.CanApply(pendingGeneration, check?.Song.Id, check?.Revision ?? -1)
                             && check is { Stable: true } && check.Player == pendingPlayer && check.SourceSongId == pendingSourceId && media.IsCurrent(check))
                         {
                             token.ThrowIfCancellationRequested();
                             checkState = "已核对并在内存绑定歌词";
                             lyrics = loaded.Document;
-                            if (pendingPlayer == MusicPlayer.NetEaseMusic) settings.NetEaseBindings[check.Song.Id] = loaded.Mid;
-                            else settings.SetVerifiedBinding(check.Song, loaded.Mid, loaded.Alias);
+                            fallback.Reset();
+                            session.Update(s => s with { NeedsSource = false });
+                            if (pendingMapping is null)
+                            {
+                                if (pendingPlayer == MusicPlayer.NetEaseMusic) settings.NetEaseBindings[check.Song.Id] = loaded.Mid;
+                                else settings.SetVerifiedBinding(check.Song, loaded.Mid, loaded.Alias);
+                            }
                             session.RememberBindings(settings);
-                            if (options.SaveSettings) settings.Save(options.SettingsPath!);
+                            if (options.SaveSettings)
+                                lock (ProbeSettings.FileSync)
+                                {
+                                    var disk = ProbeSettings.Load(options.SettingsPath!);
+                                    session.MergeBindings(disk);
+                                    disk.Save(options.SettingsPath!);
+                                }
                             snapshot = check;
                             Program.ReportDesktopLog($"当前曲目已绑定 {lyrics.Lines.Count} 行；歌词仅保存在内存。");
                         }
                     }
                     catch (OperationCanceledException) when (!token.IsCancellationRequested)
                     {
-                        checkState = "取词取消或超时；可在冷却结束后手动核对";
-                        Program.ReportDesktopLog("取词已取消或超时，本媒体版本不自动重试。");
+                        checkState = "取词已取消；可重新核对";
+                        Program.ReportDesktopLog("取词已取消或超时，本媒体版本下一首将自动继续。");
                     }
                     catch (MatchUnavailableException ex)
                     {
+                        session.Update(s => s with { NeedsSource = true });
                         checkState = MatchFailureReason(ex.Category);
                         Program.ReportDesktopLog(checkState + fallbackMessage);
                         await ArmFallbackAsync();
                     }
                     catch (UntimedLyricsException)
                     {
+                        session.Update(s => s with { NeedsSource = true });
                         checkState = "当前曲目没有可同步的时间轴";
                         Program.ReportDesktopLog(checkState + "；不锁止联网，切歌后正常核对。" + fallbackMessage);
                         await ArmFallbackAsync();
                     }
                     catch (NoLyricsException)
                     {
+                        session.Update(s => s with { NeedsSource = true });
                         checkState = "当前曲目无歌词";
                         Program.ReportDesktopLog(checkState + fallbackMessage);
                         await ArmFallbackAsync();
                     }
-                    catch (ProbeException)
+                    catch (LyricsRequestException ex)
                     {
-                        // Only locally defined, allowlisted categories are logged; never raw response text.
-                        Interlocked.Exchange(ref networkBlocked, 1);
+                        if (ex.Kind == RequestFailureKind.RateLimited) { attempted = false; checkState = "请求受限，等待自动恢复"; }
+                        else if (ex.Kind == RequestFailureKind.AccessDenied) checkState = "接口访问受限，请重新尝试";
+                        else if (pendingMapping is not null && (ex.Kind == RequestFailureKind.Identity || ex.Status is System.Net.HttpStatusCode.NotFound or System.Net.HttpStatusCode.Gone))
+                        {
+                            session.Update(s => s with { NeedsSource = true });
+                            checkState = "已记住的来源不可用，请重新选择歌词来源";
+                            Program.ReportDesktopLog(checkState + "；保留原来源映射。");
+                        }
+                        else checkState = ex.Message + "；当前曲目已跳过，下一首将自动继续";
+                        await ArmFallbackAsync();
+                    }
+                    catch (ProbeException ex)
+                    {
+                        checkState = SafeFailureReason(ex) + "；当前曲目已跳过，下一首将自动继续";
+                        Program.ReportDesktopLog(checkState);
+                        await ArmFallbackAsync();
                     }
                     catch (HttpRequestException)
                     {
-                        Interlocked.Exchange(ref networkBlocked, 1);
+                        checkState = "网络请求失败；下一首将自动继续";
+                        await ArmFallbackAsync();
                     }
                     finally
                     {
@@ -298,7 +435,8 @@ internal static class FollowRunner
                         && Stopwatch.GetElapsedTime(lastAdvance) < TimeSpan.FromMilliseconds(700)));
                 bool paused = usable && snapshot!.Status == GlobalSystemMediaTransportControlsSessionPlaybackStatus.Paused;
                 var position = usable ? snapshot!.GetPosition() : null;
-                if (Volatile.Read(ref networkBlocked) != 0) lyrics = null;
+
+                if (session.Lifecycle.IsPaused || lifecycleRevision != session.Lifecycle.Revision) continue;
                 if (options.Send)
                 {
                     token.ThrowIfCancellationRequested();
@@ -313,9 +451,14 @@ internal static class FollowRunner
                             ? !fallback.ClockSent
                             : fallback.ShouldSwitch(started.Elapsed, settings.NoLyricsTitleHoldMs))
                         {
-                            bool sent = screen!.ShowClock(settings.ClockStyle);
-                            fallback.MarkClock();
-                            Program.ReportDesktopLog(sent ? "无词降级：时钟指令已发送，实际显示及时间需确认。" : "无词降级：时钟发送失败，本轮停止写屏。");
+                            if (session.Latest.NeedsSource && !session.SourceReminderSuppressed && reminder.Show(started.Elapsed))
+                                screen!.ShowLyric("歌词待选择", reminder.Elapsed(started.Elapsed), false, snapshot!.Song.Id + ":source-reminder");
+                            else
+                            {
+                                bool sent = screen!.ShowClock(settings.ClockStyle);
+                                fallback.MarkClock();
+                                Program.ReportDesktopLog(sent ? "无词降级：时钟指令已发送，实际显示及时间需确认。" : "无词降级：时钟发送失败，本轮停止写屏。");
+                            }
                         }
                         else if (!fallback.ClockSent)
                             screen!.ShowLyric(fallback.Title, started.Elapsed - fallback.StartedAt, false, snapshot!.Song.Id + ":fallback");
@@ -349,6 +492,7 @@ internal static class FollowRunner
                     if (screen.HasFailed)
                     {
                         session.Update(s => s with { Display = "设备写入失败；实际显示未知" });
+                        if (screen.ReconnectEnabled) continue;
                         break;
                     }
                 }
@@ -359,7 +503,7 @@ internal static class FollowRunner
                     : screen.HasDisplayableLyrics ? "歌词输出阶段；实际显示待确认"
                     : "无可显示歌词；实际显示待确认" });
             }
-            while (await WaitForNextAsync(settings.PollIntervalMs, token));
+            while (await session.Lifecycle.WaitAsync(settings.PollIntervalMs, token));
         }
         finally
         {
@@ -368,15 +512,14 @@ internal static class FollowRunner
             requestCancellation?.Cancel();
             if (pending is not null) ObserveAbandoned(pending);
             requestCancellation?.Dispose();
-            if (options.Send) screen!.ClearLyrics();
+            if (options.Send)
+            {
+                bool sent = screen!.ShowClock(settings.ClockStyle);
+                Program.ReportDesktopLog(sent ? "停止：时钟指令已发送；实际显示待确认。" : "停止：未能发送时钟指令；设备可能仍保留旧内容。");
+            }
+            session.Lifecycle.Acknowledge();
         }
         return screen?.HasFailed == true ? 5 : 0;
-    }
-
-    private static async Task<bool> WaitForNextAsync(int milliseconds, CancellationToken token)
-    {
-        await Task.Delay(milliseconds, token);
-        return true;
     }
 
     internal static bool CandidateMatches(Song candidate, SongIdentity song)
@@ -397,6 +540,8 @@ internal static class FollowRunner
         _ => "无可信匹配：歌名、版本、歌手或时长冲突"
     };
 
+    private static string SafeSongId(string? id) => id is { Length: > 0 and <= 64 } && id.All(char.IsAsciiLetterOrDigit) ? id : "未知";
+
     internal static string SafeFailureReason(ProbeException error) => error.Message switch
     {
         _ when error is NetEaseLrcException lrc => "网易云 LRC 解析失败：" + lrc.Diagnostic,
@@ -412,6 +557,17 @@ internal static class FollowRunner
         "网易云接口业务码异常。" => "网易云接口业务码异常",
         "网易云响应格式错误。" => "网易云响应格式错误",
         "网易云详情 ID 不一致。" => "网易云歌曲详情 ID 不一致",
+        "不是明文 LRC 或普通 Base64。" => "歌词响应既不是明文 LRC，也不是有效 Base64",
+        "Base64 内容不是严格 UTF-8。" => "歌词 Base64 解码后不是有效 UTF-8",
+        "响应层级不是对象。" => "接口响应顶层不是 JSON 对象",
+        "缺少业务 code。" => "接口响应缺少业务码",
+        "缺少对象：data" => "接口响应缺少 data 对象",
+        "缺少对象：song" => "搜索响应缺少 song 对象",
+        "缺少对象：req_1" => "接口响应缺少 req_1 对象",
+        "网易云搜索列表缺失。" => "网易云搜索响应缺少歌曲列表",
+        "网易云搜索格式错误。" => "网易云搜索歌曲列表格式错误",
+        _ when System.Text.RegularExpressions.Regex.IsMatch(error.Message, @"\AHTTP [1-5][0-9]{2}；不跟随重定向。\z") => error.Message,
+        _ when System.Text.RegularExpressions.Regex.IsMatch(error.Message, @"\A非有效普通 LRC（解析错误 [0-9]{1,6}）。\z") => "QQ 音乐歌词解析失败：" + error.Message,
         _ => "接口响应未通过协议校验"
     };
 

@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.IO;
@@ -120,7 +120,7 @@ internal static class NetEaseSelfTests
             throw new Exception();
         });
         foreach (string body in new[] { "<html>login</html>", JsonSerializer.Serialize(new { code = 301 }), JsonSerializer.Serialize(new { code = 429 }), JsonSerializer.Serialize(new { code = 200 }) })
-            check("网易云：异常响应锁止 " + body, () =>
+            check("网易云：异常响应有限重取不锁止下一首 " + body, () =>
             {
                 var handler = new Handler((_, _) => Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) }));
                 using var client = new NetEaseLyricsClient(handler);
@@ -130,7 +130,7 @@ internal static class NetEaseSelfTests
                     try { client.FetchAsync("123").GetAwaiter().GetResult(); } catch (ProbeException) { rejected = true; }
                     Require(rejected);
                 }
-                Require(handler.Calls == 1);
+                Require(handler.Calls == (body.Contains("301") ? 1 : body.Contains("429") ? 2 : 4));
             });
         check("网易云：HTTP限流后禁止追加请求", () =>
         {
@@ -149,7 +149,7 @@ internal static class NetEaseSelfTests
             var handler = new Handler(async (_, token) => { await Task.Delay(Timeout.Infinite, token); return new HttpResponseMessage(HttpStatusCode.OK); });
             using var client = new NetEaseLyricsClient(handler, 2000);
             try { client.FetchAsync("123").GetAwaiter().GetResult(); }
-            catch (OperationCanceledException) { Require(handler.Calls == 1); return; }
+            catch (LyricsRequestException ex) { Require(ex.Kind == RequestFailureKind.Transient && handler.Calls == 3); return; }
             throw new Exception();
         });
         check("网易云：搜索候选歧义不取词", () =>

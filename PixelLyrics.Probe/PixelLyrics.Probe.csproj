@@ -24,6 +24,7 @@
                    AppRelativeDotNet="$(AppHostRelativeDotNet)" />
   </Target>
   <ItemGroup>
+    <EmbeddedResource Include="Assets/pixellyrics-notification.wav" LogicalName="PixelLyrics.Notification.wav" />
     <None Update="Assets/pixellyrics.svg" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Using Remove="System.Windows.Forms" />
     <Using Remove="System.Drawing" />

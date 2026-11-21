@@ -9,10 +9,13 @@ internal sealed record ProbeSongBinding(string Mid, string? ArtistAlias = null);
 internal sealed class ProbeSettings
 {
     internal const int MaxFileBytes = 1024 * 1024;
+    internal static readonly object FileSync = new();
+    public Dictionary<string, LyricSourceMapping> SourceMappings { get; } = new(StringComparer.Ordinal);
     public MusicPlayer Player { get; set; }
     public PlayerMode Mode { get; set; } = PlayerMode.Auto;
     public Dictionary<string, string> NetEaseBindings { get; } = new(StringComparer.Ordinal);
 
+    public bool AutoRun { get; set; }
     public int OffsetMs { get; set; }
     public int DisplayWidthUnits { get; set; } = 32;
     public int PageHoldMs { get; set; } = 2800;
@@ -53,6 +56,23 @@ internal sealed class ProbeSettings
                 if (!fields.Add(property.Name)) throw new InvalidDataException("配置字段重复。");
                 switch (property.Name)
                 {
+                    case nameof(SourceMappings):
+                        foreach (var entry in property.Value.EnumerateObject())
+                        {
+                            var names = new HashSet<string>();
+                            string? platform = null, id = null;
+                            foreach (var field in entry.Value.EnumerateObject())
+                            {
+                                if (!names.Add(field.Name)) throw new InvalidDataException("来源映射字段重复。");
+                                if (field.Name == nameof(LyricSourceMapping.Platform)) platform = field.Value.GetString();
+                                else if (field.Name == nameof(LyricSourceMapping.SongId)) id = field.Value.GetString();
+                                else throw new InvalidDataException("未知来源映射字段。");
+                            }
+                            if (!Enum.TryParse<MusicPlayer>(platform, out var source) || !Enum.IsDefined(source) || id is null
+                                || !settings.SourceMappings.TryAdd(entry.Name, new(source, id)))
+                                throw new InvalidDataException("来源映射无效。");
+                        }
+                        break;
                     case nameof(Mode):
                         settings.Mode = property.Value.GetString() switch { "Auto" => PlayerMode.Auto, "QQMusic" => PlayerMode.QQMusic,
                             "NetEaseMusic" => PlayerMode.NetEaseMusic, _ => throw new InvalidDataException("播放器模式无效。") };
@@ -64,6 +84,7 @@ internal sealed class ProbeSettings
                         foreach (var entry in property.Value.EnumerateObject())
                             if (!settings.NetEaseBindings.TryAdd(entry.Name, entry.Value.GetString()!)) throw new InvalidDataException("网易云绑定重复。");
                         break;
+                    case nameof(AutoRun): settings.AutoRun = property.Value.GetBoolean(); break;
                     case nameof(OffsetMs): settings.OffsetMs = property.Value.GetInt32(); break;
                     case nameof(DisplayWidthUnits): settings.DisplayWidthUnits = property.Value.GetInt32(); break;
                     case nameof(PageHoldMs): settings.PageHoldMs = property.Value.GetInt32(); break;
@@ -138,7 +159,7 @@ internal sealed class ProbeSettings
         string fullPath = LocalPath(path);
         string directory = Path.GetDirectoryName(fullPath)!;
         if (!Directory.Exists(directory)) throw new DirectoryNotFoundException("配置父目录必须已存在。");
-        byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { Mode = Mode.ToString(), Player = Player.ToString(), NetEaseBindings, OffsetMs, DisplayWidthUnits, PageHoldMs, ClockStyle, IdleClockEnabled, IdleClockDelayMs, TrackIntroEnabled, TrackIntroHoldMs, NoLyricsTitleHoldMs, PollIntervalMs, TrackSettleMs, RequestTimeoutMs, Bindings }, new JsonSerializerOptions { WriteIndented = true });
+        byte[] json = JsonSerializer.SerializeToUtf8Bytes(new { AutoRun, Mode = Mode.ToString(), Player = Player.ToString(), NetEaseBindings, SourceMappings = SourceMappings.ToDictionary(p => p.Key, p => new { Platform = p.Value.Platform.ToString(), p.Value.SongId }), OffsetMs, DisplayWidthUnits, PageHoldMs, ClockStyle, IdleClockEnabled, IdleClockDelayMs, TrackIntroEnabled, TrackIntroHoldMs, NoLyricsTitleHoldMs, PollIntervalMs, TrackSettleMs, RequestTimeoutMs, Bindings }, new JsonSerializerOptions { WriteIndented = true });
         if (json.Length > MaxFileBytes) throw new InvalidDataException("配置超过 1MiB 上限。");
         string temporary = Path.Combine(directory, ".probe-settings-" + Guid.NewGuid().ToString("N") + ".tmp");
         try
@@ -160,6 +181,7 @@ internal sealed class ProbeSettings
     internal void ApplyRuntimeOverrides(ProbeSettings overrides)
     {
         overrides.Validate();
+        AutoRun = overrides.AutoRun;
         Player = overrides.Player;
         Mode = overrides.Mode;
         TrackIntroEnabled = overrides.TrackIntroEnabled;
@@ -175,6 +197,14 @@ internal sealed class ProbeSettings
 
     private void Validate()
     {
+        foreach (var pair in SourceMappings)
+        {
+            var parts = pair.Key.Split(':');
+            if (parts.Length != 2 || !Enum.TryParse<MusicPlayer>(parts[0], out var playback) || !Enum.IsDefined(playback)
+                || parts[1].Length != 64 || parts[1].Any(c => !char.IsAsciiHexDigit(c))
+                || !Enum.IsDefined(pair.Value.Platform) || !LyricSourceMappings.ValidId(pair.Value.Platform, pair.Value.SongId))
+                throw new InvalidDataException("来源映射身份或歌曲 ID 无效。");
+        }
         if (!Enum.IsDefined(Mode)) throw new InvalidDataException("播放器模式无效。");
         if (!Enum.IsDefined(Player)) throw new InvalidDataException("播放器配置无效。");
         foreach (var binding in NetEaseBindings)

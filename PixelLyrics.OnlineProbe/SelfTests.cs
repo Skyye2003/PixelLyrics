@@ -1,4 +1,4 @@
-using System.Net;
+﻿using System.Net;
 using System.Text;
 using System.Text.Json;
 
@@ -208,13 +208,13 @@ internal static class SelfTests
             Assert(SongMatcher.Rank([free], free.Title, freeArtist, "Album", 263.401).Category == MatchCategory.BelowThreshold);
         });
         Test("标题主体不是子串匹配", () => Assert(SongMatcher.Evaluate(free, "Free", freeArtist, "Album", 254).Category == MatchCategory.TitleConflict));
-        Test("搜索业务错误后客户端停网", () =>
+        Test("搜索业务错误不阻止下一曲", () =>
         {
             var handler = new FakeHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent("{\"code\":9}", Encoding.UTF8) });
             using var client = new OnlineLyricsClient(handler);
             Reject(() => client.SearchAsync("test").GetAwaiter().GetResult());
             Reject(() => client.SearchAsync("test").GetAwaiter().GetResult());
-            Assert(handler.Count == 1);
+            Assert(handler.Count == 2);
         });
         Test("无歌词分类不伪装成权限错误且允许下一曲", () =>
         {
@@ -227,13 +227,13 @@ internal static class SelfTests
             }
             Assert(handler.Count == 2);
         });
-        Test("详情业务异常运行级停止", () =>
+        Test("详情业务异常不阻止下一曲", () =>
         {
             var handler = new FakeHandler(_ => new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(detail.Replace("\"code\":0", "\"code\":403"), Encoding.UTF8) });
             using var client = new OnlineLyricsClient(handler);
             Reject(() => client.GetDetailsAsync("m1").GetAwaiter().GetResult());
             Reject(() => client.GetDetailsAsync("m1").GetAwaiter().GetResult());
-            Assert(handler.Count == 1);
+            Assert(handler.Count == 2);
         });
         static HttpResponseMessage JsonResponse(string json) => new(HttpStatusCode.OK) { Content = new StringContent(json, Encoding.UTF8) };
         static string CandidateResponse(params string[] mids) => JsonSerializer.Serialize(new { code = 0, data = new { song = new { itemlist = mids.Select(mid => new { mid, name = "Last Dance", singer = "摘要不可信" }) } } });

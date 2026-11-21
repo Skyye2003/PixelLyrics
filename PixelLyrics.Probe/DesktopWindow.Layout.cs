@@ -1,4 +1,4 @@
-using System.Windows;
+﻿using System.Windows;
 using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Media;
@@ -20,6 +20,7 @@ internal sealed partial class DesktopWindow
 
     private static void IconLabel(Button button, string glyph, string label)
     {
+        if (button.Content is StackPanel existing && existing.Children.Count == 2 && existing.Children[1] is TextBlock text && text.Text == label) return;
         var content = new StackPanel { Orientation = Orientation.Horizontal };
         content.Children.Add(new TextBlock { Text = glyph, FontFamily = new FontFamily("Segoe MDL2 Assets"), Margin = new Thickness(0, 0, 8, 0), VerticalAlignment = VerticalAlignment.Center });
         content.Children.Add(new TextBlock { Text = label, VerticalAlignment = VerticalAlignment.Center });
@@ -36,6 +37,8 @@ internal sealed partial class DesktopWindow
         var navigation = new StackPanel { Orientation = Orientation.Horizontal };
         var settings = _back;
         var more = MakeButton("更多");
+        var history = MakeButton("历史记录"); IconLabel(history, "", "历史记录");
+        history.Margin = new Thickness(8, 0, 0, 0); history.Click += (_, _) => OpenSourceHistory(); navigation.Children.Add(history);
         IconLabel(settings, "\uE713", "设置");
         IconLabel(more, "\uE712", "更多");
         foreach (var button in new[] { settings, more }) { button.Width = 96; button.Height = 40; button.Margin = new Thickness(8, 0, 0, 0); navigation.Children.Add(button); }
@@ -99,11 +102,12 @@ internal sealed partial class DesktopWindow
         Grid.SetRow(songRow, 1); screen.Children.Add(songRow);
         var bottom = new Grid { Margin = new Thickness(0, 12, 0, 0) };
         bottom.ColumnDefinitions.Add(new ColumnDefinition());
-        _check.VerticalAlignment = VerticalAlignment.Center; _check.Margin = new Thickness(0);
+        _check.VerticalAlignment = VerticalAlignment.Center; _check.Margin = new Thickness(0, 0, 12, 8);
         _output.VerticalAlignment = VerticalAlignment.Center; _output.Margin = new Thickness(0);
-        _recheck.VerticalAlignment = VerticalAlignment.Center; _recheck.Margin = new Thickness(8, 0, 0, 0);
+        _recheck.VerticalAlignment = VerticalAlignment.Center; _recheck.Margin = new Thickness(0, 0, 12, 8); _chooseSource.Margin = new Thickness(0, 0, 0, 8);
         _recheck.MinHeight = 32; _recheck.Padding = new Thickness(6, 4, 6, 4);
-        var match = new WrapPanel { VerticalAlignment = VerticalAlignment.Center }; match.Children.Add(_check); match.Children.Add(_recheck);
+        var match = new WrapPanel { VerticalAlignment = VerticalAlignment.Center }; match.Children.Add(_check); match.Children.Add(_recheck); match.Children.Add(_chooseSource);
+        _chooseSource.Click += (_, _) => OpenSourceChoice();
         var matchAndError = new StackPanel(); matchAndError.Children.Add(match); matchAndError.Children.Add(_output);
         bottom.Children.Add(matchAndError);
         _output.HorizontalAlignment = HorizontalAlignment.Left;
@@ -126,13 +130,12 @@ internal sealed partial class DesktopWindow
         _player.Width = 180; _player.Height = 34; AutomationProperties.SetName(_player, "播放器"); playerRow.Children.Add(_player);
         _authorization.Content = new TextBlock { Text = "允许本次联网获取 QQ、网易云音乐歌词并输出到 USB 歌词屏", TextWrapping = TextWrapping.Wrap };
         _authorization.Margin = new Thickness(0, 12, 0, 0); AutomationProperties.SetName(_authorization, "允许本次联网获取 QQ、网易云音乐歌词并输出到 USB 歌词屏");
-        IconLabel(_start, "\uE768", "开始运行"); IconLabel(_stop, "\uE71A", "停止并清屏"); IconLabel(_recheck, "\uE72C", "重新核对曲目");
-        _start.Width = 136; _stop.Width = 136;
+        IconLabel(_start, "\uE768", "开始运行"); IconLabel(_stop, "\uE71A", "停止并显示时钟"); IconLabel(_recheck, "\uE72C", "重新核对曲目");
+        _start.Width = 136; _stop.Width = 168;
         _start.SetResourceReference(StyleProperty, "PrimaryButtonStyle");
         var actions = new StackPanel { Orientation = Orientation.Horizontal }; actions.Children.Add(_start); actions.Children.Add(_stop);
         controls.Children.Add(InlineActions(playerRow, actions, 0)); controls.Children.Add(_authorization);
-        _recheck.SetResourceReference(StyleProperty, "TextActionStyle");
-        _recheck.SetResourceReference(Control.ForegroundProperty, "ScreenTextBrush");
+        foreach (var action in new[] { _recheck, _chooseSource }) { action.Height = 42; action.MinHeight = 42; action.FontSize = 15; action.Padding = new Thickness(16, 8, 16, 8); }
         var operations = new Border { Child = controls, Padding = new Thickness(20, 14, 20, 14), CornerRadius = new CornerRadius(12), BorderThickness = new Thickness(1) };
         operations.SetResourceReference(Border.BackgroundProperty, "CardBrush"); operations.SetResourceReference(Border.BorderBrushProperty, "BorderBrush");
         Grid.SetRow(operations, 1); console.Children.Add(operations); AddPage(console, false);
@@ -142,19 +145,19 @@ internal sealed partial class DesktopWindow
         var timing = new StackPanel();
         var timingHeading = new DockPanel(); DockPanel.SetDock(_offsetText, Dock.Right); _offsetText.Margin = new Thickness(0, 0, 20, 0); timingHeading.Children.Add(_offsetText); timingHeading.Children.Add(Heading("", "同步微调")); timing.Children.Add(timingHeading);
         AutomationProperties.SetName(_offset, "歌词时间偏移（毫秒）"); _offset.Margin = new Thickness(0, 0, 0, 4); timing.Children.Add(_offset);
-        earlier = MakeButton("提前 100 ms"); later = MakeButton("延后 100 ms"); var reset = MakeButton("归零"); reset.Click += (_, _) => _offset.Value = 0;
-        var steps = new StackPanel { Orientation = Orientation.Horizontal }; steps.Children.Add(earlier); steps.Children.Add(later); steps.Children.Add(reset); foreach (var button in new[] { earlier, later, reset }) { button.MinHeight = 34; button.Padding = new Thickness(12, 4, 12, 4); } timing.Children.Insert(1, Text("负值提前，正值延后")); timing.Children.Add(steps);
+        earlier = MakeButton("提前 100 ms"); later = MakeButton("延后 100 ms"); var reset = MakeButton("归零"); reset.Click += (_, _) => _offset.Value = 0; IconLabel(earlier, "", "提前 100 ms"); IconLabel(later, "", "延后 100 ms"); IconLabel(reset, "", "归零");
+        var steps = new WrapPanel(); steps.Children.Add(earlier); steps.Children.Add(later); steps.Children.Add(reset); foreach (var button in new[] { earlier, later, reset }) { button.MinHeight = 34; button.Padding = new Thickness(12, 4, 12, 4); } timing.Children.Insert(1, Text("负值提前，正值延后")); timing.Children.Add(steps);
         display.Children.Add(timing); display.Children.Add(Rule());
         var lyrics = new StackPanel(); lyrics.Children.Add(Setting("显示宽度", _width, "以英文字符估算，汉字约占 2 单位；每段受 54 字节限制。")); lyrics.Children.Add(Setting("每段停留（ms）", _hold)); lyrics.Children.Add(ToggleRow("新曲显示歌名与歌手", _trackIntro)); lyrics.Children.Add(Setting("开场时长（ms）", _trackIntroHold));
         var clock = new StackPanel(); clock.Children.Add(Setting("时钟样式", _clockStyle)); clock.Children.Add(Setting("等待时间（ms）", _idleClockDelay)); clock.Children.Add(ToggleRow("空闲自动回钟", _idleClock));
-        IconLabel(_clock, "\uE823", "停止歌词并显示时钟"); _clock.Margin = new Thickness(0, 0, 0, 0); _clock.MinHeight = 34; _clock.Padding = new Thickness(8, 4, 8, 4); clock.Children.Add(_clock); clock.Children.Add(Text("恢复歌词需重新授权并开始"));
+        IconLabel(_clock, "\uE823", "停止歌词并显示时钟"); _clock.Margin = new Thickness(0, 0, 0, 0); _clock.MinHeight = 34; _clock.Padding = new Thickness(8, 4, 8, 4); clock.Children.Add(_clock); clock.Children.Add(Text("恢复歌词请点击开始运行"));
         display.Children.Add(Columns(Section("\uE8D2", "歌词显示", lyrics), Section("\uE823", "时钟", clock)));
         advancedButton.MinHeight = 34; advancedButton.Padding = new Thickness(12, 4, 12, 4); advancedButton.Margin = new Thickness(0, 4, 0, 0); display.Children.Add(advancedButton);
         AddPage(display);
 
         var advanced = new StackPanel();
         var parameters = new StackPanel(); parameters.Children.Add(Setting("无词停留（ms）", _noLyricsTitleHold, "无可信匹配或确认无词时生效；网络故障不视为无词。")); parameters.Children.Add(Setting("会话轮询（ms）", _pollInterval)); parameters.Children.Add(Setting("曲目稳定（ms）", _trackSettle)); parameters.Children.Add(Setting("请求超时（ms）", _requestTimeout));
-        var startup = new StackPanel(); _loginStartup.Margin = new Thickness(0, 10, 0, 10); startup.Children.Add(_loginStartup); startup.Children.Add(Text("不会自动开始歌词同步")); startup.Children.Add(_startupStatus);
+        var startup = new StackPanel(); _loginStartup.Margin = new Thickness(0, 10, 0, 10); startup.Children.Add(_loginStartup); startup.Children.Add(_autoRun); startup.Children.Add(Text("允许后续启动时自动联网获取歌词并输出到 USB 歌词屏")); startup.Children.Add(_startupStatus);
         advanced.Children.Add(Columns(Section("\uE8A5", "曲目跟随", parameters), Section("\uE7F4", "登录自启", startup))); AddPage(advanced);
 
         var diagnostics = new Grid();

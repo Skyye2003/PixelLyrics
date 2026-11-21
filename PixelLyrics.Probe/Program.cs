@@ -17,6 +17,7 @@ internal static class Program
 
     internal static void ReportDesktopLog(string message)
     {
+        SafetyLog.Append(message);
         Console.WriteLine(message);
         DesktopLog?.Invoke(message);
     }
@@ -33,7 +34,7 @@ internal static class Program
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
-            ReportDesktopLog("运行已停止；退出清屏流程已执行，实际显示以设备为准。");
+            ReportDesktopLog("运行已停止；退出回钟流程已执行，实际显示以设备为准。");
             return 0;
         }
         catch (Exception ex)
@@ -132,7 +133,7 @@ internal static class Program
         }
         catch (PixelLyrics.OnlineProbe.ProbeException ex)
         {
-            Console.Error.WriteLine("在线校验失败（不重试）：" + JsonSerializer.Serialize(ex.Message));
+            Console.Error.WriteLine("在线校验未完成：" + JsonSerializer.Serialize(ex.Message));
             return 4;
         }
         catch (Exception ex)
@@ -191,7 +192,8 @@ internal static class Program
         session?.Update(s => s with { Active = DesktopParameters.From(settings) });
         if (options.Accessibility) return DiagnoseAccessibility(cancellationToken);
         if (options.DesktopLyrics) return await DiagnoseDesktopLyricsAsync(options, cancellationToken);
-        var screen = ScreenOutput.Enumerate(options.TestScreen || options.Send || options.ScreenSequence);
+        var screen = session is not null && options.Send ? ScreenOutput.Waiting()
+            : ScreenOutput.Enumerate(options.TestScreen || options.Send || options.ScreenSequence);
         cancellationToken.ThrowIfCancellationRequested();
         if ((options.Send || options.TestScreen || options.ScreenSequence) && screen is null) return 3;
         if (screen is not null)
@@ -266,7 +268,7 @@ internal static class Program
         else if (options.Online)
         {
             if (initial is null || initial.Player != MusicPlayer.QQMusic) return 4;
-            Console.WriteLine("--online 授权：向 QQ音乐发送启动歌名、歌手和 MID 以搜索、核对详情及取普通 LRC；不发送 Cookie/凭据/播放进度，不代理、不重定向、不重试。默认仅预览，只有 --send 才写屏。");
+            Console.WriteLine("--online 授权：向 QQ音乐发送启动歌名、歌手和 MID 以搜索、核对详情及取普通 LRC；不发送 Cookie/凭据/播放进度，不代理、不重定向；临时故障有限重试。默认仅预览，只有 --send 才写屏。");
             if (initial is null || !initial.Stable || !media.IsCurrent(initial)
                 || string.IsNullOrWhiteSpace(initial.Song.Artist) || string.IsNullOrWhiteSpace(initial.Song.Album))
             {
